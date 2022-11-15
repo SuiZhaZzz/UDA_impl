@@ -96,6 +96,22 @@ class EncoderDecoder(BaseSegmentor):
 
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses
+    
+    def _decode_head_forward_train_w_pred(self,
+                                   x,
+                                   img_metas,
+                                   gt_semantic_seg,
+                                   seg_weight=None):
+        """Run forward function and calculate loss for decode head in
+        training."""
+        losses = dict()
+        loss_decode, pred = self.decode_head.forward_train_w_pred(x, img_metas,
+                                                     gt_semantic_seg,
+                                                     self.train_cfg,
+                                                     seg_weight)
+
+        losses.update(add_prefix(loss_decode, 'decode'))
+        return losses, pred
 
     def _decode_head_forward_test(self, x, img_metas):
         """Run forward function and calculate loss for decode head in
@@ -160,6 +176,50 @@ class EncoderDecoder(BaseSegmentor):
         loss_decode = self._decode_head_forward_train(x, img_metas,
                                                       gt_semantic_seg,
                                                       seg_weight)
+        losses.update(loss_decode)
+
+        if self.with_auxiliary_head:
+            loss_aux = self._auxiliary_head_forward_train(
+                x, img_metas, gt_semantic_seg, seg_weight)
+            losses.update(loss_aux)
+
+        return losses
+
+    def forward_train_w_pred(self,
+                      img,
+                      img_metas,
+                      gt_semantic_seg,
+                      seg_weight=None,
+                      return_feat=False,
+                      return_pred=True):
+        """Forward function for training.
+
+        Args:
+            img (Tensor): Input images.
+            img_metas (list[dict]): List of image info dict where each dict
+                has: 'img_shape', 'scale_factor', 'flip', and may also contain
+                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
+                For details on the values of these keys see
+                `mmseg/datasets/pipelines/formatting.py:Collect`.
+            gt_semantic_seg (Tensor): Semantic segmentation masks
+                used if the architecture supports semantic segmentation task.
+
+        Returns:
+            dict[str, Tensor]: a dictionary of loss components
+        """
+        x = self.extract_feat(img)
+
+        losses = dict()
+        if return_feat:
+            losses['features'] = x
+
+        loss_decode, pred = self._decode_head_forward_train_w_pred(x, img_metas,
+                                                      gt_semantic_seg,
+                                                      seg_weight)
+
+        if return_pred:
+            losses['pred'] = pred
+        
         losses.update(loss_decode)
 
         if self.with_auxiliary_head:

@@ -16,8 +16,8 @@ PyYAML==5.4.1
 scipy==1.6.3
 seaborn==0.11.1
 timm==0.3.2
-torch==1.7.1+cu110
-torchvision==0.8.2+cu110
+torch>=1.7.1
+torchvision>=0.8.2
 tqdm==4.48.2
 typing-extensions==3.7.4.3
 wcwidth==0.2.5

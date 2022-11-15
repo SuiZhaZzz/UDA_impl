@@ -4,5 +4,6 @@
 # ---------------------------------------------------------------
 
 from mmseg.models.uda.dacs import DACS
+from .gan import GAN
 
-__all__ = ['DACS']
+__all__ = ['DACS', 'GAN']

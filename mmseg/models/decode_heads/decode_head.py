@@ -194,6 +194,16 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
         losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
         return losses
 
+    def forward_train_w_pred(self,
+                            inputs,
+                            img_metas,
+                            gt_semantic_seg,
+                            train_cfg,
+                            seg_weight=None):
+        seg_logits = self.forward(inputs)
+        losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
+        return losses, seg_logits
+
     def forward_test(self, inputs, img_metas, test_cfg):
         """Forward function for testing.
 
