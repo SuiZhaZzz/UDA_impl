@@ -111,11 +111,11 @@ num_workers=8
 max_epoches=60
 wt_dec=5e-4
 lr=0.01
-weights='/home/b502/workspace_zhangbo/IFR-main/IFR/pretrained/res38_cls.pth'
+weights='/root/autodl-tmp/DAFormer/pretrained/res38_cls.pth'
 #step1: build the model
 model=ClsNet()
 #step2: build the dataset
-training_dataset=cityscape_cls_dataset('/home/b502/workspace_zhangbo/IFR-main/IFR/mmseg/models/segmentors/clsnet/data/cls_label.json')
+training_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/segmentors/clsnet/data/cls_label.json')
 train_data_loader = DataLoader(training_dataset,
                                     batch_size=batch_size,
                                     shuffle=True,

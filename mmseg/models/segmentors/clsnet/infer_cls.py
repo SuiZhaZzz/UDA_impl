@@ -41,11 +41,11 @@ class cityscape_cls_dataset(Dataset):
     def __len__(self):
         return len(self.file_names)
 #一些参数
-weights='/home/b502/workspace_zhangbo/IFR-main/IFR/checkpoint/ep40.pth'
+weights='/root/autodl-tmp/DAFormer/pretrained/ep50.pth'
 #建立模型
 model=ClsNet()
 #建立数据集
-val_dataset=cityscape_cls_dataset('/home/b502/workspace_zhangbo/IFR-main/IFR/mmseg/models/segmentors/clsnet/data/val_cls_label.json')
+val_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/segmentors/clsnet/data/val_cls_label.json')
 val_loader = DataLoader(val_dataset,batch_size=1,shuffle=False, num_workers=1)
 #载入预训练模型
 weights_dict = torch.load(weights)
