@@ -13,6 +13,16 @@ uda = dict(
     # Discriminator
     power=0.9,
     lr_dis=1e-4,
-    px_wo_cls_adv_lambda=0.01
+    px_wo_cls_adv_lambda=0.01,
+
+    px_adv_lambda=0.01,
+    lr_px_d=1e-4,
+    img_adv_lambda=0.01,
+    lr_img_d=1e-4,
+
+    # Cls
+    cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ep50.pth',
+    cls_thred=0.5
+    
 )
 use_ddp_wrapper = True
