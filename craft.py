@@ -1,33 +1,16 @@
-import torch.nn as nn
-import torch.nn.functional as F
+import torch
 
+def get_one_hot(label, N):
+    assert label.dim() == 1
+    print(label)
+    ones = torch.sparse.torch.eye(N)
+    print(ones)
+    ones = label.unsqueeze(-1)*ones
+    print(ones)
+    mask = ones.sum(dim=1) > 0
+    print(mask)
+    return ones[mask]
 
-class FCDiscriminator(nn.Module):
-
-	def __init__(self, num_classes, ndf = 64):
-		super(FCDiscriminator, self).__init__()
-
-		self.conv1 = nn.Conv2d(num_classes, ndf, kernel_size=4, stride=2, padding=1)
-		self.classifier = nn.Conv2d(ndf, 1, kernel_size=4, stride=2, padding=1)
-
-		self.leaky_relu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
-		#self.up_sample = nn.Upsample(scale_factor=32, mode='bilinear')
-		#self.sigmoid = nn.Sigmoid()
-
-
-	def forward(self, x):
-		x = self.conv1(x)
-		x = self.leaky_relu(x)
-		x = self.classifier(x)
-		#x = self.up_sample(x)
-		#x = self.sigmoid(x) 
-
-		return x
-
-def main():
-    model = FCDiscriminator(2)
-    print(model)
-    print(list(model.parameters()))
-
-if __name__ == '__main__':
-    main()
+gt = torch.tensor([0.6, 0, 0.7, 0])
+gt_one_hot = get_one_hot(gt, 4)
+print(gt_one_hot)
