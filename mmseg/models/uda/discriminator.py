@@ -8,12 +8,7 @@ def soft_label_cross_entropy(pred, soft_label, pixel_weights=None):
         return torch.mean(torch.sum(loss, dim=1))
     return torch.mean(pixel_weights*torch.sum(loss, dim=1))
 
-def get_one_hot_cls(label, N):
-    assert label.dim() == 1
-    ones = torch.sparse.torch.eye(N).cuda()
-    ones = label.unsqueeze(-1)*ones
-    mask = ones.sum(dim=1) > 0
-    return ones[mask]
+
 
 class FCDiscriminatorWoCls(nn.Module):
     def __init__(self, num_classes=19, ndf=64):
@@ -135,7 +130,7 @@ class ImageDiscriminator(nn.Module):
         src_out = [self.cls1(y) for y in out]
         tgt_out = [self.cls2(y) for y in out]   # b*n*19
         # labels = [torch.nonzero(gt_2k[i]).squeeze(1) for i in range(gt_2k.shape[0])]
-        labels = [gt_2k[i] for i in range(gt_2k.shape[0])]  # b*38
+        labels = [gt_2k[i][mask[i]] for i in range(batch_size)]  # b*n*38
 
         losses = dict()
         loss = 0
@@ -148,8 +143,6 @@ class ImageDiscriminator(nn.Module):
             if label.sum() == 0:
                 continue
             cnt += label.sum()
-            # Multi-hot(1,38) to one-hot(n,38)
-            label = get_one_hot_cls(label, label.shape[0]).detach()
             out = torch.cat((src_logit, tgt_logit), dim=1)
             loss += soft_label_cross_entropy(out, label)
 
@@ -163,7 +156,5 @@ class ImageDiscriminator(nn.Module):
         losses['acc_img_dis'] = (acc / cnt) * 100.0
         if return_inv:
             losses['loss_img_dis_inv'] = loss_inv
-
-        # assert 0==1
 
         return losses

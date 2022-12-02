@@ -107,14 +107,34 @@ def generate_class_mask(label, classes):
 
 
 def one_mix(mask, data=None, target=None):
+    # (1,1,H,W) (2,3,H,W) (2,H,W)
     if mask is None:
         return data, target
     if not (data is None):
+        # (3,H,W)
         stackedMask0, _ = torch.broadcast_tensors(mask[0], data[0])
+        # (1,3,H,W)
         data = (stackedMask0 * data[0] +
                 (1 - stackedMask0) * data[1]).unsqueeze(0)
     if not (target is None):
         stackedMask0, _ = torch.broadcast_tensors(mask[0], target[0])
+        # (1,1,H,W)
         target = (stackedMask0 * target[0] +
                   (1 - stackedMask0) * target[1]).unsqueeze(0)
     return data, target
+
+def lbl_retain(mask, lbl):
+    # (1,H,W)
+    stackedMask0, _ = torch.broadcast_tensors(mask[0], lbl[0])
+    # (1,1,H,W)
+    src_lbl = lbl[0].masked_fill(stackedMask0==0, 255).unsqueeze(0)
+    tgt_lbl = lbl[1].masked_fill(stackedMask0==1, 255).unsqueeze(0)
+    return src_lbl, tgt_lbl
+
+def weight_retain(mask, weight):
+    # (1,H,W)
+    stackedMask0, _ = torch.broadcast_tensors(mask[0], weight[0])
+    src_weight = (stackedMask0 * weight[0]).unsqueeze(0)
+    tgt_weight = ((1 - stackedMask0) * weight[1]).unsqueeze(0)
+    # (1,H,W)
+    return src_weight, tgt_weight
