@@ -21,6 +21,7 @@ from timm.models.layers import DropPath
 from torch.nn.modules.dropout import _DropoutNd
 import torch.optim as optim
 import torch.nn.functional as F
+from torchvision.utils import save_image
 
 from mmseg.core import add_prefix
 from mmseg.models import UDA, build_segmentor
@@ -32,7 +33,8 @@ from mmseg.models.utils.visualization import subplotimg
 from mmseg.utils.utils import downscale_label_ratio
 
 from mmseg.models.uda.clsnet.network.resnet38_cls import ClsNet
-from mmseg.models.uda.discriminator import FCDiscriminatorWoCls, PixelDiscriminator, ImageDiscriminator
+from mmseg.models.uda.discriminator import PixelDiscriminator, ImageDiscriminator
+from mmseg.models.utils.fda import FDA_source_to_target
 
 def _params_equal(ema_model, model):
     for ema_param, param in zip(ema_model.named_parameters(),
@@ -117,7 +119,6 @@ class MultiDA(UDADecorator):
         self.dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.num_classes = cfg['model']['decode_head']['num_classes']
         self.power = cfg['power']
-        self.temperature = cfg['temperature']
 
         self.src_lbl = 0
         self.tgt_lbl = 1
@@ -148,6 +149,21 @@ class MultiDA(UDADecorator):
             self.cls_thred = cfg['cls_thred']
             self.cls_model.eval()
 
+        # Normalize
+        self.norm_cfg = cfg['norm_cfg']
+        self.to_rgb = cfg['to_rgb']
+
+        # Style transfer
+        self.enable_fft = cfg['enable_fft']
+        self.fft_beta = cfg['fft_beta']
+        self.enable_style_gan = cfg['enable_style_gan']
+
+        # Category contrast
+        self.enable_ctrst = cfg['enable_ctrst']
+        self.ctrst_lambda = cfg['ctrst_lambda']
+        self.rare_class_id = cfg['rare_class_id']
+        self.temperature = cfg['temperature']
+            
     def get_ema_model(self):
         return get_module(self.ema_model)
 
@@ -222,6 +238,95 @@ class MultiDA(UDADecorator):
         if len(optimizer.param_groups) > 1:
             optimizer.param_groups[1]['lr'] = lr * 10
 
+    def init_norm_param(self, img_metas):
+        for i in range(len(img_metas)):
+            img_metas[i]['img_norm_cfg']['mean'] = np.array(self.norm_cfg['mean'], dtype=np.float32)
+            img_metas[i]['img_norm_cfg']['std'] = np.array(self.norm_cfg['std'], dtype=np.float32)
+            img_metas[i]['img_norm_cfg']['to_rgb'] = self.to_rgb
+        return img_metas
+
+    def normalize(self, img, mean, std):
+        mean = torch.tensor(mean).reshape(1,3,1,1).cuda()
+        std = torch.tensor(std).reshape(1,3,1,1).cuda()
+        stdinv = 1.0 / std
+        img = img - mean
+        img = torch.mul(img, stdinv)    
+        return img
+
+    def downscale_label_ratio(self, gt, scale_factor, min_ratio, n_classes, ignore_index=255):
+        assert scale_factor > 1
+        bs, orig_c, orig_h, orig_w = gt.shape
+        assert orig_c == 1
+        trg_h, trg_w = orig_h // scale_factor, orig_w // scale_factor
+        ignore_substitute = n_classes
+
+        out = gt.clone()  # otw. next line would modify original gt
+        out[out == ignore_index] = ignore_substitute
+        out = F.one_hot(
+            out.squeeze(1), num_classes=n_classes + 1).permute(0, 3, 1, 2)
+        assert list(out.shape) == [bs, n_classes + 1, orig_h, orig_w], out.shape
+        out = F.avg_pool2d(out.float(), kernel_size=scale_factor)
+        gt_ratio, out = torch.max(out, dim=1, keepdim=True)
+        out[out == ignore_substitute] = ignore_index
+        out[gt_ratio < min_ratio] = ignore_index
+        assert list(out.shape) == [bs, 1, trg_h, trg_w], out.shape
+        return out
+
+    def calculate_cl_loss(self, feat_seg, feat_cls, cam_19, gt):
+        # (B,512,H1,W1) (B,512,H2,W2) (B,19,H2,W2) (B,1,H,W)
+        assert feat_seg.shape[1] == feat_cls.shape[1]
+        b, ch, _, _ = feat_seg.shape
+        c = cam_19.shape[1]
+        # gt = gt.clone().un
+        # Positive samples
+        # (b,19,512)
+        Vsamples = torch.sum(cam_19.unsqueeze(2) * feat_cls.unsqueeze(1), dim=[-2,-1]) / torch.sum(cam_19, dim=[-2,-1]).view(b, c, 1)
+        Vsamples = Vsamples.cuda()
+        # Downsample gt
+        gt = self.downscale_label_ratio(gt,gt.shape[-1]//feat_seg.shape[-1],0.75,19)
+        gt = gt.squeeze()   # (B,H,W)
+        loss = []
+        for i in range(b):
+            classes = torch.unique(gt[i])
+            rare_class_cnt=0
+            cl_loss=0.0
+            for ci in classes:
+                ci_cl_loss = 0.0
+                if ci in self.rare_class_id:
+                    feat_seg_ci = feat_seg[ci]  # (512,H1,W1)
+                    mask_ci = (gt[i]==ci)
+                    feat_seg_ci = feat_seg_ci[:, mask_ci]   # (512, n)
+                    if feat_seg_ci.shape[1] <= 1:
+                        continue
+                    # Calculate vi * v+
+                    vi_vplus = torch.zeros(feat_seg_ci.shape[1]).cuda() # (n)
+                    vi_vplus = torch.cosine_similarity(Vsamples[i,ci,:].unsqueeze(0), feat_seg_ci.t(), dim=1)
+                    vi_vplus = torch.exp(vi_vplus / self.temperature)
+                    # Calculate vi * v-
+                    v_negtive = Vsamples[i].clone() # (19, 512)
+                    v_negtive[ci, :] = 0.0
+                    vi_vsub = torch.zeros(feat_seg_ci.shape[1]).cuda()  # (n)
+                    vi_vsub = torch.cosine_similarity(feat_seg_ci.t().unsqueeze(1), v_negtive.unsqueeze(0), dim=2)  # (n,19)
+                    vi_vsub = torch.sum(vi_vsub, dim=1)
+                    vi_vsub = torch.exp(vi_vsub / self.temperature)
+
+                    ci_cl_loss = vi_vplus / (vi_vplus + vi_vsub)
+                    ci_cl_loss = -torch.log(ci_cl_loss)
+                    ci_cl_loss = torch.mean(ci_cl_loss)
+
+                    rare_class_cnt += 1
+                cl_loss += ci_cl_loss
+            
+            if rare_class_cnt == 0:
+                pass
+            else:
+                loss.append(cl_loss / rare_class_cnt)
+        
+        if len(loss) != 0:
+            return sum(loss) / len(loss)
+        else:
+            return 0
+        
     def train_step(self, data_batch, optimizer, **kwargs):
         # The iteration step during training.
         if self.local_iter == 0:
@@ -274,6 +379,26 @@ class MultiDA(UDADecorator):
         batch_size = img.shape[0]
         dev = img.device
 
+        if self.to_rgb:
+            img = img.flip(dims=[1])
+            target_img = target_img.flip(dims=[1])
+        
+        img_metas = self.init_norm_param(img_metas)
+        target_img_metas = self.init_norm_param(target_img_metas)
+        
+        if self.enable_fft:
+            img = FDA_source_to_target(img, target_img, L=self.fft_beta).cuda()
+
+        # for i in range(batch_size):
+        #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/img_src_before_norm_" + str(i) + ".png")
+
+        img = self.normalize(img, **self.norm_cfg)
+        target_img = self.normalize(target_img, **self.norm_cfg)
+        
+        # for i in range(batch_size):
+        #     save_image(img[i], "/root/autodl-tmp/DAFormer/demo/img_src_after_norm_" + str(i) + ".png")
+        #     save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/img_tgt_after_norm_" + str(i) + ".png")
+
         # Init/update ema model
         if self.local_iter == 0:
             self._init_ema_weights()
@@ -296,19 +421,32 @@ class MultiDA(UDADecorator):
         }
 
         with torch.no_grad():
-            # One-hot seg label (B, 19, H, W)
+            # Original seg label (B,1,H,W)
+            # One-hot seg label (B,19,H,W)
             src_seg_gt = get_one_hot(gt_semantic_seg, self.num_classes)
             b, c, _, _ = src_seg_gt.shape
 
             # Calculate CAM
             if self.enable_cls:
                 # _, _, y_19 = self.cls_model(img)
-                src_cam_19, _ = self.cls_model.forward_cam(img)
+                src_cam_19, src_feat_cls = self.cls_model.forward_cam(img)
                 # src_cam_19 = F.upsample(src_cam_19_feat, size, mode='bilinear', align_corners=False)
                 src_cls_gt, _ = src_seg_gt.view(b, c, -1).max(dim=2)
                 src_cls_gt = (src_cls_gt > 0).float()   # (B, 19)
                 src_cls_gt_one_hot = get_one_hot_cls(src_cls_gt, self.num_classes)  # (B,C,C)
                 # src_cam_19 = src_cam_19 * src_cls_gt.unsqueeze(-1).unsqueeze(-1)
+                # Ignore unseen class
+                src_cam_19_masked = src_cam_19.clone()
+                for i in range(batch_size):
+                    classes = torch.unique(gt_semantic_seg[i].clone())
+                    masks = torch.zeros(19).cuda()
+                    masks[classes] = 1
+                    src_cam_19_masked[i] = src_cam_19_masked[i] * masks.view(c, 1, 1)
+                # Normalize
+                for i in range(batch_size):
+                    max_val, _ = src_cam_19_masked[i].view(c, -1).max(dim=1)
+                    max_val = torch.where(max_val==0, 1.0, max_val.double())
+                    src_cam_19_masked[i] = src_cam_19_masked[i] / max_val.view(c, 1, 1)                    
 
         # Train G
 
@@ -330,6 +468,13 @@ class MultiDA(UDADecorator):
         log_vars.update(clean_log_vars)
         # Source Segmentation loss
         clean_loss.backward(retain_graph=self.enable_fdist)
+
+        # Category contrast
+        if self.enable_ctrst:
+            src_cl_loss = self.calculate_cl_loss(src_feat[-1], src_feat_cls, src_cam_19_masked, gt_semantic_seg)
+            log_vars['src.cl_loss'] = src_cl_loss
+            src_cl_loss = src_cl_loss * self.ctrst_lambda
+            src_cl_loss.backward(retain_graph=True)
         
         if self.print_grad_magnitude:
             params = self.get_model().backbone.parameters()
@@ -462,7 +607,8 @@ class MultiDA(UDADecorator):
         with torch.no_grad():
             # y_19 -- multi-hot cls prediction (B, 19)
             # _, _, y_19 = self.cls_model(mixed_img)
-            mix_cam_19, _ = self.cls_model.forward_cam(mixed_img)
+            if self.enable_cls:
+                mix_cam_19, _ = self.cls_model.forward_cam(mixed_img)
             # mask = (y_19 > self.cls_thred).float()
             # mix_cls_pred = y_19 * mask  # (B, 19)
             # mix_cam_19 = mix_cam_19 * mask.unsqueeze(-1).unsqueeze(-1)  # (B, 19, H, W)

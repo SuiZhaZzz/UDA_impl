@@ -21,22 +21,34 @@ uda = dict(
     print_grad_magnitude=False,
     # Discriminator
     power=0.9,
-    temperature=1.8,
     # Pixel level without class in output space
     enable_px_wo_cls_d=False,
     px_wo_cls_adv_lambda=0.01,
     lr_px_wo_cls_d=1e-4,
     # Pixel level in feature space
-    enable_px_d=True,
+    enable_px_d=False,
     px_adv_lambda=0.01,
     lr_px_d=1e-4,
     # Image level in feature space
-    enable_img_d=True,
+    enable_img_d=False,
     img_adv_lambda=0.01,
     lr_img_d=1e-4,
     # Image classifier
-    enable_cls=True,
+    enable_cls=False,
     cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ep50.pth',
-    cls_thred=0.5
+    cls_thred=0.5,
+    # Style transfer
+    enable_fft=True,
+    fft_beta=0.01,
+    enable_style_gan=False,
+    # Normalize outside pipeline
+    to_rgb = True,
+    norm_cfg = dict(
+        mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
+    # Category contrast
+    enable_ctrst = True,
+    ctrst_lambda = 0.5,
+    rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
+    temperature=0.5,
 )
 use_ddp_wrapper = True

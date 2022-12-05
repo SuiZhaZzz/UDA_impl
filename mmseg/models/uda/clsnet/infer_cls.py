@@ -70,8 +70,8 @@ for iter, (data,img_path ,label_19) in tqdm(enumerate(val_loader)):
         print(label_19)
         #可视化特征图
         #/home/b502/workspace_zhangbo/IFR-main/IFR/res
-        # for index in range(cam_19.shape[0]):#通过遍历的方式，将20个通道的tensor拿出
-        #     imageio.imsave( '/home/b502/workspace_zhangbo/IFR-main/IFR/res/feature_map_save/'+str(index) + ".png", cam_19[index])
+        for index in range(cam_19.shape[0]):#通过遍历的方式，将20个通道的tensor拿出
+            imageio.imsave( '/home/b502/workspace_zhangbo/IFR-main/IFR/res/feature_map_save/'+str(index) + ".png", cam_19[index])
         assert 1==0
         #计算准确率
         cls19_prob = y_19.cpu().data.numpy()

@@ -142,7 +142,7 @@ model=model.cuda()
 model.train()
 avg_meter = AverageMeter('loss')
 step=0
-save_folder='/home/b502/workspace_zhangbo/IFR-main/IFR/checkpoint'
+save_folder='/root/autodl-tmp/DAFormer/pretrained'
 for ep in range(max_epoches):
         ep_count = 0
         ep_acc_vote = 0
@@ -183,5 +183,5 @@ for ep in range(max_epoches):
             step += 1
         #10个epoch保存一次模型
         if ep % 10 == 0:
-            torch.save(model.state_dict(), '{}/'.format(save_folder) + 'ep{}.pth'.format(ep))
+            torch.save(model.state_dict(), '{}/'.format(save_folder) + 'ClsEp{}.pth'.format(ep))
             print('Loss: {} achieves the lowest one => Epoch {} weights are saved!'.format(loss, ep))
