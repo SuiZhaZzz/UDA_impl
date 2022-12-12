@@ -34,12 +34,13 @@ uda = dict(
     img_adv_lambda=0.01,
     lr_img_d=1e-4,
     # Image classifier
-    enable_cls=False,
-    cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ep50.pth',
+    enable_cls=True,
+    cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ClsEp50.pth',
     cls_thred=0.5,
     # Style transfer
-    enable_fft=True,
+    enable_fft=False,
     fft_beta=0.01,
+    fft_lambda = 1,
     enable_style_gan=False,
     # Normalize outside pipeline
     to_rgb = True,
@@ -49,6 +50,6 @@ uda = dict(
     enable_ctrst = True,
     ctrst_lambda = 0.5,
     rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
-    temperature=0.5,
+    temperature=1,
 )
 use_ddp_wrapper = True

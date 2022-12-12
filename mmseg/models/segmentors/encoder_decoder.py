@@ -87,10 +87,20 @@ class EncoderDecoder(BaseSegmentor):
                                    x,
                                    img_metas,
                                    gt_semantic_seg,
-                                   seg_weight=None):
+                                   seg_weight=None,
+                                   return_feat=False):
         """Run forward function and calculate loss for decode head in
         training."""
         losses = dict()
+        if return_feat:
+            loss_decode, feat = self.decode_head.forward_train(x, img_metas,
+                                                     gt_semantic_seg,
+                                                     self.train_cfg,
+                                                     seg_weight,
+                                                     return_feat=return_feat)
+            losses.update(add_prefix(loss_decode, 'decode'))
+            return losses, feat
+
         loss_decode = self.decode_head.forward_train(x, img_metas,
                                                      gt_semantic_seg,
                                                      self.train_cfg,
@@ -153,7 +163,8 @@ class EncoderDecoder(BaseSegmentor):
                       img_metas,
                       gt_semantic_seg,
                       seg_weight=None,
-                      return_feat=False):
+                      return_feat=False,
+                      return_fusefeat=False):
         """Forward function for training.
 
         Args:
@@ -175,7 +186,14 @@ class EncoderDecoder(BaseSegmentor):
         if return_feat:
             losses['features'] = x
 
-        loss_decode = self._decode_head_forward_train(x, img_metas,
+        if return_fusefeat:
+            loss_decode, fusefeat = self._decode_head_forward_train(x, img_metas,
+                                                      gt_semantic_seg,
+                                                      seg_weight,
+                                                      return_feat=return_fusefeat)
+            losses['fusefeatures'] = fusefeat
+        else:
+            loss_decode = self._decode_head_forward_train(x, img_metas,
                                                       gt_semantic_seg,
                                                       seg_weight)
         losses.update(loss_decode)

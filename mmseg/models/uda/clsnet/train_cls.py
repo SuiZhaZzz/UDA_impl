@@ -115,7 +115,9 @@ weights='/root/autodl-tmp/DAFormer/pretrained/res38_cls.pth'
 #step1: build the model
 model=ClsNet()
 #step2: build the dataset
-training_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/segmentors/clsnet/data/cls_label.json')
+# training_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/segmentors/clsnet/data/cls_label.json')
+# gta
+training_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/data/gta/cls_label.json')
 train_data_loader = DataLoader(training_dataset,
                                     batch_size=batch_size,
                                     shuffle=True,

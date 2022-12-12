@@ -8,16 +8,25 @@ _base_ = [
     # DAFormer Network Architecture
     '../_base_/models/daformer_sepaspp_mitb5.py',
     # GTA->Cityscapes Data Loading
-    '../_base_/datasets/uda_gta_to_cityscapes_512x512_multi_da.py',
+    # '../_base_/datasets/uda_gta_to_cityscapes_512x512_wo_norm.py',
+    '../_base_/datasets/uda_gta_to_cityscapes_512x512.py',
     # Basic UDA Self-Training
     '../_base_/uda/multi_da.py',
     # AdamW Optimizer
-    '../_base_/schedules/adamw.py',
+    '../_base_/schedules/adamw_small.py',
     # Linear Learning Rate Warmup with Subsequent Linear Decay
-    '../_base_/schedules/poly10warm.py'
+    '../_base_/schedules/cosine_warm.py'
 ]
 # Random Seed
 seed = 0
+model = dict(
+    decode_head=dict(
+        channels=512,
+        decoder_params=dict(
+            embed_dims=512,
+        ),
+    )
+)
 # Modifications to Basic UDA
 uda = dict(
     # Increased Alpha
@@ -28,7 +37,38 @@ uda = dict(
     imnet_feature_dist_scale_min_ratio=0.75,
     # Pseudo-Label Crop
     pseudo_weight_ignore_top=15,
-    pseudo_weight_ignore_bottom=120)
+    pseudo_weight_ignore_bottom=120,
+    # Discriminator
+    power=0.9,
+    # Pixel level without class in output space
+    enable_px_wo_cls_d=False,
+    px_wo_cls_adv_lambda=0.01,
+    lr_px_wo_cls_d=1e-4,
+    # Pixel level in feature space
+    enable_px_d=False,
+    px_adv_lambda=0.01,
+    lr_px_d=1e-4,
+    # Image level in feature space
+    enable_img_d=False,
+    img_adv_lambda=0.01,
+    lr_img_d=1e-4,
+    # Image classifier
+    enable_cls=True,
+    cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ClsEp50.pth',
+    cls_thred=0.5,
+    # Style transfer
+    enable_fft=False,
+    fft_beta=0.01,
+    enable_style_gan=False,
+    # Normalize outside pipeline
+    to_rgb = True,
+    norm_cfg = dict(
+        mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
+    # Category contrast
+    enable_ctrst = True,
+    ctrst_lambda = 0.5,
+    rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
+    temperature=1)
 data = dict(
     train=dict(
         # Rare Class Sampling
@@ -46,8 +86,8 @@ optimizer = dict(
 n_gpus = 1
 runner = dict(type='IterBasedRunner', max_iters=40000)
 # Logging Configuration
-checkpoint_config = dict(by_epoch=False, interval=4000, max_keep_ckpts=2)
-evaluation = dict(interval=4000, metric='mIoU')
+checkpoint_config = dict(by_epoch=False, interval=1500, max_keep_ckpts=2)
+evaluation = dict(interval=1500, metric='mIoU')
 # Meta Information for Result Analysis
 name = 'gta2cs_uda_warm_fdthings_rcs_croppl_a999_multi_da_mitb5_s0'
 exp = 'basic'

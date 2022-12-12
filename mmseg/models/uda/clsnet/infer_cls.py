@@ -11,6 +11,9 @@ import torch.optim as optim
 from tqdm import tqdm
 import torch.nn.functional as F
 import imageio
+import cv2
+from torchvision.utils import save_image
+
 #该数据集主要起喂给分类网络训练数据的作用
 class cityscape_cls_dataset(Dataset):
     def __init__(self,cls_label_json_path):
@@ -45,7 +48,7 @@ weights='/root/autodl-tmp/DAFormer/pretrained/ep50.pth'
 #建立模型
 model=ClsNet()
 #建立数据集
-val_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/segmentors/clsnet/data/val_cls_label.json')
+val_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/uda/clsnet/data/val_cls_label_test.json')
 val_loader = DataLoader(val_dataset,batch_size=1,shuffle=False, num_workers=1)
 #载入预训练模型
 weights_dict = torch.load(weights)
@@ -60,21 +63,23 @@ for iter, (data,img_path ,label_19) in tqdm(enumerate(val_loader)):
     with torch.no_grad():
         #喂入模型,前向传播
         x_19,fea,y_19=model(img)
+        save_image()
         #推理类别激活图
         cam_19,fea_conv4=model.forward_cam(img)
         orig_img = np.asarray(Image.open(img_path[0]))
         orig_img_size = orig_img.shape[:2]
-        cam_19 = F.upsample(cam_19, orig_img_size, mode='bilinear', align_corners=False)[0]
+        cam_19 = F.upsample(cam_19, (224,224), mode='nearest')[0]
         cam_19 = cam_19.detach().cpu().numpy() * label_19.clone().view(19, 1, 1).cpu().numpy()
         print(img_path)
         print(label_19)
         #可视化特征图
         #/home/b502/workspace_zhangbo/IFR-main/IFR/res
         for index in range(cam_19.shape[0]):#通过遍历的方式，将20个通道的tensor拿出
-            imageio.imsave( '/home/b502/workspace_zhangbo/IFR-main/IFR/res/feature_map_save/'+str(index) + ".png", cam_19[index])
-        assert 1==0
+            imageio.imsave( '/root/autodl-tmp/DAFormer/demo/'+str(index) + "_cam.png", cam_19[index])
         #计算准确率
         cls19_prob = y_19.cpu().data.numpy()
+        print(cls19_prob)
+        assert 1==0
         cls19_gt = label_19.cpu().data.numpy()
         cls19_prob=cls19_prob[0]
         cls19_gt=cls19_gt[0]

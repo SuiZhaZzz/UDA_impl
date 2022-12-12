@@ -149,14 +149,15 @@ class MultiDA(UDADecorator):
             self.cls_thred = cfg['cls_thred']
             self.cls_model.eval()
 
-        # Normalize
-        self.norm_cfg = cfg['norm_cfg']
-        self.to_rgb = cfg['to_rgb']
-
         # Style transfer
         self.enable_fft = cfg['enable_fft']
-        self.fft_beta = cfg['fft_beta']
         self.enable_style_gan = cfg['enable_style_gan']
+        self.fft_beta = cfg['fft_beta']
+        self.fft_lambda = cfg['fft_lambda']
+
+        # Normalize
+        self.to_rgb = cfg['to_rgb']
+        self.norm_cfg = cfg['norm_cfg']
 
         # Category contrast
         self.enable_ctrst = cfg['enable_ctrst']
@@ -238,6 +239,9 @@ class MultiDA(UDADecorator):
         if len(optimizer.param_groups) > 1:
             optimizer.param_groups[1]['lr'] = lr * 10
 
+    def adjust_temperature(self):
+        self.temperature = 1.0 / (1.0 + math.log(self.local_iter))
+
     def init_norm_param(self, img_metas):
         for i in range(len(img_metas)):
             img_metas[i]['img_norm_cfg']['mean'] = np.array(self.norm_cfg['mean'], dtype=np.float32)
@@ -274,14 +278,14 @@ class MultiDA(UDADecorator):
 
     def calculate_cl_loss(self, feat_seg, feat_cls, cam_19, gt):
         # (B,512,H1,W1) (B,512,H2,W2) (B,19,H2,W2) (B,1,H,W)
-        assert feat_seg.shape[1] == feat_cls.shape[1]
+        assert feat_seg.shape[1] == feat_cls.shape[1], feat_seg.shape[1]
         b, ch, _, _ = feat_seg.shape
         c = cam_19.shape[1]
         # gt = gt.clone().un
         # Positive samples
         # (b,19,512)
         Vsamples = torch.sum(cam_19.unsqueeze(2) * feat_cls.unsqueeze(1), dim=[-2,-1]) / torch.sum(cam_19, dim=[-2,-1]).view(b, c, 1)
-        Vsamples = Vsamples.cuda()
+        Vsamples = Vsamples.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).cuda()
         # Downsample gt
         gt = self.downscale_label_ratio(gt,gt.shape[-1]//feat_seg.shape[-1],0.75,19)
         gt = gt.squeeze()   # (B,H,W)
@@ -293,7 +297,7 @@ class MultiDA(UDADecorator):
             for ci in classes:
                 ci_cl_loss = 0.0
                 if ci in self.rare_class_id:
-                    feat_seg_ci = feat_seg[ci]  # (512,H1,W1)
+                    feat_seg_ci = feat_seg[i]  # (512,H1,W1)
                     mask_ci = (gt[i]==ci)
                     feat_seg_ci = feat_seg_ci[:, mask_ci]   # (512, n)
                     if feat_seg_ci.shape[1] <= 1:
@@ -307,21 +311,20 @@ class MultiDA(UDADecorator):
                     v_negtive[ci, :] = 0.0
                     vi_vsub = torch.zeros(feat_seg_ci.shape[1]).cuda()  # (n)
                     vi_vsub = torch.cosine_similarity(feat_seg_ci.t().unsqueeze(1), v_negtive.unsqueeze(0), dim=2)  # (n,19)
-                    vi_vsub = torch.sum(vi_vsub, dim=1)
                     vi_vsub = torch.exp(vi_vsub / self.temperature)
-
+                    vi_vsub = torch.sum(vi_vsub, dim=1)
                     ci_cl_loss = vi_vplus / (vi_vplus + vi_vsub)
+                    ci_cl_loss = ci_cl_loss.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
                     ci_cl_loss = -torch.log(ci_cl_loss)
                     ci_cl_loss = torch.mean(ci_cl_loss)
 
                     rare_class_cnt += 1
                 cl_loss += ci_cl_loss
-            
             if rare_class_cnt == 0:
                 pass
             else:
                 loss.append(cl_loss / rare_class_cnt)
-        
+
         if len(loss) != 0:
             return sum(loss) / len(loss)
         else:
@@ -334,6 +337,11 @@ class MultiDA(UDADecorator):
                 self.px_d_model.train()
             if self.enable_img_d:
                 self.img_d_model.train()
+
+        # Simulated annealing
+        if self.enable_ctrst:
+            if self.local_iter >= 1:
+                self.adjust_temperature()
 
         # Discriminator
         if self.enable_px_d:
@@ -379,25 +387,32 @@ class MultiDA(UDADecorator):
         batch_size = img.shape[0]
         dev = img.device
 
-        if self.to_rgb:
-            img = img.flip(dims=[1])
-            target_img = target_img.flip(dims=[1])
-        
-        img_metas = self.init_norm_param(img_metas)
-        target_img_metas = self.init_norm_param(target_img_metas)
-        
+        # FFT and Normalize
         if self.enable_fft:
-            img = FDA_source_to_target(img, target_img, L=self.fft_beta).cuda()
+            if self.to_rgb:
+                img = img.flip(dims=[1])
+                target_img = target_img.flip(dims=[1])
 
-        # for i in range(batch_size):
-        #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/img_src_before_norm_" + str(i) + ".png")
+            img_metas = self.init_norm_param(img_metas)
+            target_img_metas = self.init_norm_param(target_img_metas)
 
-        img = self.normalize(img, **self.norm_cfg)
-        target_img = self.normalize(target_img, **self.norm_cfg)
-        
-        # for i in range(batch_size):
-        #     save_image(img[i], "/root/autodl-tmp/DAFormer/demo/img_src_after_norm_" + str(i) + ".png")
-        #     save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/img_tgt_after_norm_" + str(i) + ".png")
+            target_img_src_st = FDA_source_to_target(target_img, img, L=self.fft_beta).cuda()
+            
+            for i in range(batch_size):
+                save_image(img[i], "/root/autodl-tmp/DAFormer/demo/src_before_norm" + str(i) + "_.png")
+                save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/tgt_before_norm" + str(i) + "_.png")
+                save_image(target_img_src_st[i], "/root/autodl-tmp/DAFormer/demo/tgt_in_src_before_norm" + str(i) + "_.png")
+
+            img = self.normalize(img, **self.norm_cfg)
+            target_img = self.normalize(target_img, **self.norm_cfg)
+            target_img_src_st = self.normalize(target_img_src_st, **self.norm_cfg)
+
+            for i in range(batch_size):
+                save_image(img[i], "/root/autodl-tmp/DAFormer/demo/src_after_norm" + str(i) + "_.png")
+                save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/tgt_after_norm" + str(i) + "_.png")
+                save_image(target_img_src_st[i], "/root/autodl-tmp/DAFormer/demo/tgt_in_src_after_norm" + str(i) + "_.png")
+
+            assert 1==0
 
         # Init/update ema model
         if self.local_iter == 0:
@@ -438,7 +453,8 @@ class MultiDA(UDADecorator):
                 # Ignore unseen class
                 src_cam_19_masked = src_cam_19.clone()
                 for i in range(batch_size):
-                    classes = torch.unique(gt_semantic_seg[i].clone())
+                    classes = torch.unique(gt_semantic_seg[i])
+                    classes = classes[classes!=255]
                     masks = torch.zeros(19).cuda()
                     masks[classes] = 1
                     src_cam_19_masked[i] = src_cam_19_masked[i] * masks.view(c, 1, 1)
@@ -460,8 +476,9 @@ class MultiDA(UDADecorator):
 
         # Train on source images
         clean_losses = self.get_model().forward_train(
-            img, img_metas, gt_semantic_seg, return_feat=True)
+            img, img_metas, gt_semantic_seg, return_feat=True, return_fusefeat=True)
         src_feat = clean_losses.pop('features')
+        src_fusefeat = clean_losses.pop('fusefeatures')
 
         clean_losses = add_prefix(clean_losses, 'src')
         clean_loss, clean_log_vars = self._parse_losses(clean_losses)
@@ -471,10 +488,12 @@ class MultiDA(UDADecorator):
 
         # Category contrast
         if self.enable_ctrst:
-            src_cl_loss = self.calculate_cl_loss(src_feat[-1], src_feat_cls, src_cam_19_masked, gt_semantic_seg)
-            log_vars['src.cl_loss'] = src_cl_loss
-            src_cl_loss = src_cl_loss * self.ctrst_lambda
-            src_cl_loss.backward(retain_graph=True)
+            src_cl_loss = self.calculate_cl_loss(src_fusefeat, src_feat_cls, src_cam_19_masked, gt_semantic_seg)
+            log_vars['src.cl_loss'] = 0.0
+            if src_cl_loss != 0:
+                log_vars['src.cl_loss'] = src_cl_loss.item()
+                src_cl_loss = src_cl_loss * self.ctrst_lambda
+                src_cl_loss.backward(retain_graph=True)
         
         if self.print_grad_magnitude:
             params = self.get_model().backbone.parameters()
@@ -554,6 +573,16 @@ class MultiDA(UDADecorator):
         # (B,H,W)
         gt_pixel_weight = torch.ones((pseudo_weight.shape), device=dev)
 
+        # Train on target image in source style
+        tgt_src_st_losses = self.get_model().forward_train(
+            target_img_src_st, img_metas, pseudo_label, pseudo_weight)
+
+        tgt_src_st_losses = add_prefix(tgt_src_st_losses, 'tgt_src_st')
+        tgt_src_st_loss, tgt_src_st_log_vars = self._parse_losses(tgt_src_st_losses)
+        log_vars.update(tgt_src_st_log_vars)
+        tgt_src_st_loss = self.fft_lambda * tgt_src_st_loss
+        tgt_src_st_loss.backward(retain_graph=True)
+
         # Apply mixing
         mixed_img, mixed_lbl = [None] * batch_size, [None] * batch_size
         mix_masks = get_class_masks(gt_semantic_seg)
@@ -597,8 +626,8 @@ class MultiDA(UDADecorator):
         tgt_sum = tgt_lbl_retain.view(b,c,-1).sum(dim=2).float()
         mix_sum = mix_lbl_onehot.view(b,c,-1).sum(dim=2).float()
         # (B,C)
-        src_cls_retain = (src_sum / mix_sum).nan_to_num(nan=0.0).detach()
-        tgt_cls_retain = (tgt_sum / mix_sum).nan_to_num(nan=0.0).detach()
+        src_cls_retain = (src_sum / mix_sum).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
+        tgt_cls_retain = (tgt_sum / mix_sum).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
         mix_cls_lbl = src_cls_retain + tgt_cls_retain
         # (B,C,C)
         src_cls_retain = get_one_hot_cls(src_cls_retain, src_cls_retain.shape[1]).detach()
