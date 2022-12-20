@@ -13,9 +13,9 @@ _base_ = [
     # Basic UDA Self-Training
     '../_base_/uda/multi_da.py',
     # AdamW Optimizer
-    '../_base_/schedules/adamw_small.py',
+    '../_base_/schedules/adamw.py',
     # Linear Learning Rate Warmup with Subsequent Linear Decay
-    '../_base_/schedules/cosine_warm.py'
+    '../_base_/schedules/poly10warm.py'
 ]
 # Random Seed
 seed = 0
@@ -53,22 +53,28 @@ uda = dict(
     img_adv_lambda=0.01,
     lr_img_d=1e-4,
     # Image classifier
-    enable_cls=True,
+    enable_cls=False,
     cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ClsEp50.pth',
     cls_thred=0.5,
     # Style transfer
     enable_fft=False,
-    fft_beta=0.01,
     enable_style_gan=False,
+    fft_beta=0.01,
+    enable_src_in_tgt=False,
+    enable_tgt_in_src=False,
+    enable_src_in_tgt_b4_train=False,
+    enable_st_consistency=False,
+    st_consistency_lambda=0.1,
     # Normalize outside pipeline
     to_rgb = True,
     norm_cfg = dict(
         mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
     # Category contrast
     enable_ctrst = True,
-    ctrst_lambda = 0.5,
+    ctrst_lambda = 0.05,
     rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
-    temperature=1)
+    temperature=0.2,
+    mix_proto_alpha=0.5)
 data = dict(
     train=dict(
         # Rare Class Sampling
@@ -84,12 +90,13 @@ optimizer = dict(
             pos_block=dict(decay_mult=0.0),
             norm=dict(decay_mult=0.0))))
 n_gpus = 1
-runner = dict(type='IterBasedRunner', max_iters=40000)
+runner = dict(type='IterBasedRunner', max_iters=60000)
 # Logging Configuration
-checkpoint_config = dict(by_epoch=False, interval=1500, max_keep_ckpts=2)
-evaluation = dict(interval=1500, metric='mIoU')
+checkpoint_config = dict(by_epoch=False, interval=2000, max_keep_ckpts=2)
+evaluation = dict(interval=2000, metric='mIoU')
+resume_from = '/root/autodl-tmp/DAFormer/work_dirs/local-basic/221215_1906_gta2cs_uda_ctrst_warm_fdthings_rcs_croppl_a999_multi_da_mitb5_s0_f6656/iter_40000.pth'
 # Meta Information for Result Analysis
-name = 'gta2cs_uda_warm_fdthings_rcs_croppl_a999_multi_da_mitb5_s0'
+name = 'gta2cs_uda_ctrst_warm_fdthings_rcs_croppl_a999_multi_da_mitb5_s0'
 exp = 'basic'
 name_dataset = 'gta2cityscapes'
 name_architecture = 'daformer_sepaspp_mitb5'

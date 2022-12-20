@@ -19,6 +19,10 @@ import numpy as np
 from matplotlib import cm
 from PIL import Image
 
+CLASSES = ('road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
+               'traffic light', 'traffic sign', 'vegetation', 'terrain', 'sky',
+               'person', 'rider', 'car', 'truck', 'bus', 'train', 'motorcycle',
+               'bicycle')
 
 def overlay_mask(img: Image.Image, mask: Image.Image, colormap: str = "jet", alpha: float = 0.7) -> Image.Image:
     """Overlay a colormapped mask on a background image
@@ -73,14 +77,16 @@ class cityscape_cls_dataset(Dataset):
         #载入图片
         img=Image.open(self.file_names[index]).convert("RGB")
         #载入完成之后数据增强
-        img = imtools.ResizeLong(img, 256, 512)
-        img = imtools.Flip(img)
-        img = imtools.ColorJitter(img)
-        img = np.array(img)
-        img = imtools.NNormalize(img)
-        img = imtools.Crop(img, self.crop_size)
-        img = img.transpose(2,0,1)
-        img = torch.from_numpy(img)
+        # img = imtools.ResizeLong(img, 256, 512)
+        # img = imtools.Flip(img)
+        # img = imtools.ColorJitter(img)
+        # img = np.array(img)
+        # img = imtools.NNormalize(img)
+        # img = imtools.Crop(img, self.crop_size)
+        # img = img.transpose(2,0,1)
+        img = np.asarray(img)
+        img = model.normalize(img)
+        img = imtools.HWC_to_CHW(img)
         return img,self.file_names[index],label19
     def __len__(self):
         return len(self.file_names)
@@ -89,7 +95,7 @@ weights='/root/autodl-tmp/DAFormer/pretrained/ep50.pth'
 #建立模型
 model=ClsNet()
 #建立数据集
-val_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/uda/clsnet/data/val_cls_label_test.json')
+val_dataset=cityscape_cls_dataset('/root/autodl-tmp/DAFormer/mmseg/models/uda/clsnet/data/gta_val_label.json')
 val_loader = DataLoader(val_dataset,batch_size=1,shuffle=False, num_workers=1)
 #载入预训练模型
 weights_dict = torch.load(weights)
@@ -98,29 +104,29 @@ model=model.cuda()
 model.eval()
 class_wise_acc=np.zeros(19)
 class_wise_all_cnt=np.zeros(19)
+it = 0
 for iter, (data,img_path ,label_19) in tqdm(enumerate(val_loader)):
     img = data.cuda()
     label_19=label_19.cuda()
+    ori_img = Image.open(img_path[0])
+    ori_img.save("/root/autodl-tmp/DAFormer/demo/cam_gta_" + str(it) + ".png")
+
     with torch.no_grad():
         #喂入模型,前向传播
         x_19,fea,y_19=model(img)
-        save_image()
         #推理类别激活图
         cam_19,fea_conv4=model.forward_cam(img)
-        orig_img = np.asarray(Image.open(img_path[0]))
-        orig_img_size = orig_img.shape[:2]
-        cam_19 = F.upsample(cam_19, (224,224), mode='nearest')[0]
         cam_19 = cam_19.detach().cpu().numpy() * label_19.clone().view(19, 1, 1).cpu().numpy()
-        print(img_path)
-        print(label_19)
+        # print(img.shape)
+        # print(cam_19.shape)
+        # assert 1==0
         #可视化特征图
-        #/home/b502/workspace_zhangbo/IFR-main/IFR/res
-        for index in range(cam_19.shape[0]):#通过遍历的方式，将20个通道的tensor拿出
-            imageio.imsave( '/root/autodl-tmp/DAFormer/demo/'+str(index) + "_cam.png", cam_19[index])
+        for index in range(19):#通过遍历的方式，将19个通道的tensor拿出
+            result = overlay_mask(ori_img, to_pil_image(cam_19[0][index], mode='F'), alpha=0.5)
+            result.save("/root/autodl-tmp/DAFormer/demo/cam_gta_" + str(it) + "_" + str(index) + "_" + CLASSES[index] + ".png")
+            # imageio.imsave( '/root/autodl-tmp/DAFormer/demo/'+str(index) + "_cam.png", cam_19[index])
         #计算准确率
         cls19_prob = y_19.cpu().data.numpy()
-        print(cls19_prob)
-        assert 1==0
         cls19_gt = label_19.cpu().data.numpy()
         cls19_prob=cls19_prob[0]
         cls19_gt=cls19_gt[0]
@@ -131,6 +137,7 @@ for iter, (data,img_path ,label_19) in tqdm(enumerate(val_loader)):
                 class_wise_acc[i]+=1
             if cls19_gt[i]==1:
                 class_wise_all_cnt[i]+=1
+    it = it + 1
 for i in range(19):
     if class_wise_all_cnt[i]!=0:
         class_wise_acc[i]=class_wise_acc[i]/class_wise_all_cnt[i]

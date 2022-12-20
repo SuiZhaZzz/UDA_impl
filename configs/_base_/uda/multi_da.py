@@ -34,22 +34,35 @@ uda = dict(
     img_adv_lambda=0.01,
     lr_img_d=1e-4,
     # Image classifier
-    enable_cls=True,
+    enable_cls=False,
     cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ClsEp50.pth',
     cls_thred=0.5,
     # Style transfer
     enable_fft=False,
-    fft_beta=0.01,
-    fft_lambda = 1,
     enable_style_gan=False,
+    fft_beta=0.01,
+    enable_src_in_tgt = False,
+    enable_tgt_in_src = False,
+    enable_st_consistency = False,
+    st_consistency_lambda = 0.5,
+    enable_src_in_tgt_b4_train = False,
+    # Mix setting
+    enable_mix_ss_tt = False,
+    enable_mix_st_tt = False,
+    enable_mix_ss_ts = False,
+    mix_consistency_lambda = 1,
+    # Rare class mix
+    enable_rcm=True,
+    rare_class_mix=[],
     # Normalize outside pipeline
     to_rgb = True,
     norm_cfg = dict(
         mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
     # Category contrast
-    enable_ctrst = True,
+    enable_ctrst = False,
     ctrst_lambda = 0.5,
     rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
-    temperature=1,
+    temperature=0.2,
+    mix_proto_alpha=0.5
 )
 use_ddp_wrapper = True

@@ -1,7 +1,7 @@
 import json
 
-fname = "/root/autodl-tmp/DAFormer/data/gta/sample_class_stats_dict.json"
-outname = "/root/autodl-tmp/DAFormer/data/gta/cls_label.json"
+fname = "/root/autodl-tmp/DAFormer/data/cityscapes/sample_class_stats_dict.json"
+outname = "/root/autodl-tmp/DAFormer/data/cityscapes/cls_label.json"
 f = open(fname)
 
 data = json.load(f)

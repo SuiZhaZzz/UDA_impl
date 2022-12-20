@@ -14,7 +14,7 @@ cityscapes_train_pipeline = [
     dict(type='RandomCrop', crop_size=crop_size, cat_max_ratio=0.75),
     dict(type='RandomFlip', prob=0.5),
     # dict(type='PhotoMetricDistortion'),  # is applied later in dacs.py
-    dict(type='Normalize', **img_norm_cfg),
+    # dict(type='Normalize', **img_norm_cfg),
     dict(type='Pad', size=crop_size, pad_val=0, seg_pad_val=255),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img', 'gt_semantic_seg']),
@@ -25,7 +25,7 @@ acdc_night_train_pipeline = [
     dict(type='RandomCrop', crop_size=crop_size),
     dict(type='RandomFlip', prob=0.5),
     # dict(type='PhotoMetricDistortion'),  # is applied later in dacs.py
-    dict(type='Normalize', **img_norm_cfg),
+    # dict(type='Normalize', **img_norm_cfg),
     dict(type='Pad', size=crop_size, pad_val=0, seg_pad_val=255),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img']),
@@ -74,5 +74,5 @@ data = dict(
         type='ACDCNightDataset',
         data_root='data/acdc/',
         img_dir='rgb_anon/night/test',
-        ann_dir='gt/night/test',
+        ann_dir='',
         pipeline=test_pipeline))

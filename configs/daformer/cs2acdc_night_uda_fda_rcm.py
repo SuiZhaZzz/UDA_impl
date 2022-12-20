@@ -7,8 +7,8 @@ _base_ = [
     '../_base_/default_runtime.py',
     # DAFormer Network Architecture
     '../_base_/models/daformer_sepaspp_mitb5.py',
-    # GTA->Cityscapes Data Loading
-    '../_base_/datasets/uda_gta_to_cityscapes_512x512_wo_norm.py',
+    # Cityscapes->ACDC Night Data Loading
+    '../_base_/datasets/uda_cityscapes_to_acdc_night_512x512_wo_norm.py',
     # Basic UDA Self-Training
     '../_base_/uda/multi_da.py',
     # AdamW Optimizer
@@ -29,35 +29,17 @@ uda = dict(
     # Pseudo-Label Crop
     pseudo_weight_ignore_top=15,
     pseudo_weight_ignore_bottom=120,
-    # Discriminator
-    power=0.9,
-    # Pixel level without class in output space
-    enable_px_wo_cls_d=False,
-    px_wo_cls_adv_lambda=0.01,
-    lr_px_wo_cls_d=1e-4,
-    # Pixel level in feature space
-    enable_px_d=False,
-    px_adv_lambda=0.01,
-    lr_px_d=1e-4,
-    # Image level in feature space
-    enable_img_d=False,
-    img_adv_lambda=0.01,
-    lr_img_d=1e-4,
-    # Image classifier
-    enable_cls=False,
-    cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ClsEp50.pth',
-    cls_thred=0.5,
     # Style transfer
     enable_fft=True,
     enable_style_gan=False,
     fft_beta=0.01,
-    enable_src_in_tgt = True,
+    enable_src_in_tgt = False,
     enable_tgt_in_src = False,
-    enable_st_consistency = True,
+    enable_st_consistency = False,
     st_consistency_lambda = 0.5,
-    enable_src_in_tgt_before_train = False,
+    enable_src_in_tgt_b4_train = True,
     # Mix setting
-    enable_mix_ss_tt = True,
+    enable_mix_ss_tt = False,
     enable_mix_st_tt = False,
     enable_mix_ss_ts = False,
     mix_consistency_lambda = 1,
@@ -65,11 +47,9 @@ uda = dict(
     to_rgb = True,
     norm_cfg = dict(
         mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
-    # Category contrast
-    enable_ctrst = False,
-    ctrst_lambda = 0.5,
-    rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
-    temperature=1,
+    # Rare class mix
+    enable_rcm=True,
+    rare_class_mix=[3,4,5,6,7,9,11,12,14,15,17,18]
     )
 data = dict(
     train=dict(
@@ -91,9 +71,9 @@ runner = dict(type='IterBasedRunner', max_iters=40000)
 checkpoint_config = dict(by_epoch=False, interval=4000, max_keep_ckpts=2)
 evaluation = dict(interval=4000, metric='mIoU')
 # Meta Information for Result Analysis
-name = 'gta2cs_uda_data_aug_warm_fdthings_rcs_croppl_a999_multi_da_mitb5_s0'
+name = 'cs2acdc_night_uda_fda_rcm'
 exp = 'basic'
-name_dataset = 'gta2cityscapes'
+name_dataset = 'cityscapes2acdcnight'
 name_architecture = 'daformer_sepaspp_mitb5'
 name_encoder = 'mitb5'
 name_decoder = 'daformer_sepaspp'

@@ -123,6 +123,8 @@ class MultiDA(UDADecorator):
         self.src_lbl = 0
         self.tgt_lbl = 1
 
+
+        self.enable_adver = False
         # TODO: Task level discriminator
 
         # Pixel level discriminator
@@ -153,17 +155,30 @@ class MultiDA(UDADecorator):
         self.enable_fft = cfg['enable_fft']
         self.enable_style_gan = cfg['enable_style_gan']
         self.fft_beta = cfg['fft_beta']
-        self.fft_lambda = cfg['fft_lambda']
+        self.enable_src_in_tgt = cfg['enable_src_in_tgt']
+        self.enable_tgt_in_src = cfg['enable_tgt_in_src']
+        self.enable_src_in_tgt_b4_train = cfg['enable_src_in_tgt_b4_train']
+
+        # Style consistency regularization
+        self.enable_st_consistency = cfg['enable_st_consistency']
+        self.st_consistency_lambda = cfg['st_consistency_lambda']
 
         # Normalize
         self.to_rgb = cfg['to_rgb']
         self.norm_cfg = cfg['norm_cfg']
+
+        # Rare class mix
+        self.enable_rcm = cfg['enable_rcm']
+        if self.enable_rcm:
+            self.rare_class_mix = cfg['rare_class_mix']
 
         # Category contrast
         self.enable_ctrst = cfg['enable_ctrst']
         self.ctrst_lambda = cfg['ctrst_lambda']
         self.rare_class_id = cfg['rare_class_id']
         self.temperature = cfg['temperature']
+        self.mix_proto_alpha = cfg['mix_proto_alpha']
+        self.protos = torch.rand(self.num_classes, 256).cuda()
             
     def get_ema_model(self):
         return get_module(self.ema_model)
@@ -257,25 +272,6 @@ class MultiDA(UDADecorator):
         img = torch.mul(img, stdinv)    
         return img
 
-    def downscale_label_ratio(self, gt, scale_factor, min_ratio, n_classes, ignore_index=255):
-        assert scale_factor > 1
-        bs, orig_c, orig_h, orig_w = gt.shape
-        assert orig_c == 1
-        trg_h, trg_w = orig_h // scale_factor, orig_w // scale_factor
-        ignore_substitute = n_classes
-
-        out = gt.clone()  # otw. next line would modify original gt
-        out[out == ignore_index] = ignore_substitute
-        out = F.one_hot(
-            out.squeeze(1), num_classes=n_classes + 1).permute(0, 3, 1, 2)
-        assert list(out.shape) == [bs, n_classes + 1, orig_h, orig_w], out.shape
-        out = F.avg_pool2d(out.float(), kernel_size=scale_factor)
-        gt_ratio, out = torch.max(out, dim=1, keepdim=True)
-        out[out == ignore_substitute] = ignore_index
-        out[gt_ratio < min_ratio] = ignore_index
-        assert list(out.shape) == [bs, 1, trg_h, trg_w], out.shape
-        return out
-
     def calculate_cl_loss(self, feat_seg, feat_cls, cam_19, gt):
         # (B,512,H1,W1) (B,512,H2,W2) (B,19,H2,W2) (B,1,H,W)
         assert feat_seg.shape[1] == feat_cls.shape[1], feat_seg.shape[1]
@@ -287,7 +283,7 @@ class MultiDA(UDADecorator):
         Vsamples = torch.sum(cam_19.unsqueeze(2) * feat_cls.unsqueeze(1), dim=[-2,-1]) / torch.sum(cam_19, dim=[-2,-1]).view(b, c, 1)
         Vsamples = Vsamples.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).cuda()
         # Downsample gt
-        gt = self.downscale_label_ratio(gt,gt.shape[-1]//feat_seg.shape[-1],0.75,19)
+        gt = downscale_label_ratio(gt,gt.shape[-1]//feat_seg.shape[-1],0.75,19)
         gt = gt.squeeze()   # (B,H,W)
         loss = []
         for i in range(b):
@@ -329,7 +325,93 @@ class MultiDA(UDADecorator):
             return sum(loss) / len(loss)
         else:
             return 0
+
+    def calc_proto(self, label, feat, q=None):
+        # label: (B, 1, H, W) / feat: (B, C, H', W') / q: (B, 1, H, W)
+
+        # Downsample
+        label = downscale_label_ratio(label, label.shape[-1]//feat.shape[-1], 0.75, 19)
         
+        if q != None:
+            q = F.avg_pool2d(q, kernel_size=q.shape[-1]//feat.shape[-1])
+            q_protos = torch.zeros(self.num_classes, 1).cuda()
+
+        b, c, _, _ = feat.shape
+        protos = torch.rand(self.num_classes, c).cuda()
+
+        for i in range(self.num_classes):
+            mask = (label == i) # (B,1,H,W)
+            sz = torch.sum(mask, dim=[-2,-1]) # (B, 1)
+            cnt = torch.sum(sz > 0)
+            if cnt == 0:
+                continue
+            feat_i = feat * mask # (B, C, H, W)
+            proto = torch.sum(feat_i, dim=[-2, -1]) / sz # (B, C)
+            proto = proto.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+            proto = torch.sum(proto, dim=0) / cnt # (C)
+            protos[i] = proto
+        
+            if q != None:
+                q_i = q * mask
+                q_i = torch.sum(q_i, dim=[-2, -1]) / sz # (B, 1)
+                q_i = q_i.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+                q_i = torch.sum(q_i, dim=0) / cnt # (1)
+                q_protos[i] = q_i
+
+        if q != None:
+            return protos, q_protos
+
+        return protos
+        
+    def calc_cl_loss_wo_cam(self, feat, label, q=None):
+        # protos: (19, C) / feat: (B, C, H', W') / label: (B, 1, H, W) / q: (B, 1, H, W)
+
+        assert self.protos.dim() == 2
+        assert self.protos.shape[1] == feat.shape[1]
+        b, c, _, _ = feat.shape
+
+        # Downsample
+        label = downscale_label_ratio(label, label.shape[-1]//feat.shape[-1], 0.75, 19)
+        if q != None:
+            q = F.avg_pool2d(q, kernel_size=q.shape[-1]//feat.shape[-1])
+            q = q.squeeze(1) # (B,H,W)
+
+        feat = feat.permute(1, 0, 2, 3) # (C, B, H, W)
+        # feat = feat.view(c, -1) # (C, B*H*W)
+        
+        losses = []
+
+        for i in range(self.num_classes):
+            if i in self.rare_class_id:
+                mask = (label == i) # (B,1,H,W)
+                mask = mask.squeeze(1) # (B, H, W)
+
+                v = feat[:, mask] # (C, N)
+                v = v.permute(1, 0) # (N, C)
+                n = v.shape[0] 
+                if n == 0:
+                    continue
+                # v_vplus = v.mm(protos[i].unsqueeze(1)) # (n,C)*(C,1)=(n,1)
+                v_vplus = torch.cosine_similarity(v, self.protos[i].unsqueeze(0), dim=1) # (n,C) (n,1) => (n)
+                v_vplus = torch.exp(v_vplus / self.temperature)
+                # v_vsub = v.mm(protos.permute(1, 0)) # (n, 19)
+                v_vsub = torch.cosine_similarity(v.unsqueeze(1), self.protos.unsqueeze(0), dim=2) # (n,1,C) (1,19,C) => (n,19)
+                v_vsub =  torch.exp(v_vsub / self.temperature)
+                v_vsub = torch.sum(v_vsub, dim=1) # (n)
+                loss = v_vplus / v_vsub # (n)
+                loss = -torch.log(loss)
+                
+                if q != None:
+                    q_i = q[mask] # (n)
+                    loss = loss * q_i
+
+                loss = torch.mean(loss)
+                losses.append(loss)
+
+        if len(losses) == 0:
+            return 0
+        return sum(losses) / len(losses)
+
     def train_step(self, data_batch, optimizer, **kwargs):
         # The iteration step during training.
         if self.local_iter == 0:
@@ -339,9 +421,9 @@ class MultiDA(UDADecorator):
                 self.img_d_model.train()
 
         # Simulated annealing
-        if self.enable_ctrst:
-            if self.local_iter >= 1:
-                self.adjust_temperature()
+        # if self.enable_ctrst:
+        #     if self.local_iter >= 1:
+        #         self.adjust_temperature()
 
         # Discriminator
         if self.enable_px_d:
@@ -396,23 +478,37 @@ class MultiDA(UDADecorator):
             img_metas = self.init_norm_param(img_metas)
             target_img_metas = self.init_norm_param(target_img_metas)
 
-            target_img_src_st = FDA_source_to_target(target_img, img, L=self.fft_beta).cuda()
-            
+            # for i in range(batch_size):
+            #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/src_before_norm" + str(i) + "_.png")
+            #     save_image(target_img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/tgt_before_norm" + str(i) + "_.png")
+
+            if self.enable_src_in_tgt_b4_train:
+                img = FDA_source_to_target(img, target_img, L=self.fft_beta).cuda()
+
             for i in range(batch_size):
-                save_image(img[i], "/root/autodl-tmp/DAFormer/demo/src_before_norm" + str(i) + "_.png")
-                save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/tgt_before_norm" + str(i) + "_.png")
-                save_image(target_img_src_st[i], "/root/autodl-tmp/DAFormer/demo/tgt_in_src_before_norm" + str(i) + "_.png")
+                save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/src_in_tgt_before_norm" + str(i) + "_.png")
+
+            if self.enable_src_in_tgt:
+                src_img_in_tgt = FDA_source_to_target(img, target_img, L=self.fft_beta).cuda()
+            if self.enable_tgt_in_src:
+                tgt_img_in_src = FDA_source_to_target(target_img, img, L=self.fft_beta).cuda()
+            
+            # for i in range(batch_size):
+            #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/src_before_norm" + str(i) + "_.png")
+            #     save_image(target_img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/tgt_before_norm" + str(i) + "_.png")
+            #     save_image(tgt_img_in_src[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/tgt_in_src_before_norm" + str(i) + "_.png")
 
             img = self.normalize(img, **self.norm_cfg)
             target_img = self.normalize(target_img, **self.norm_cfg)
-            target_img_src_st = self.normalize(target_img_src_st, **self.norm_cfg)
+            if self.enable_src_in_tgt:
+                src_img_in_tgt = self.normalize(src_img_in_tgt, **self.norm_cfg)
+            if self.enable_tgt_in_src:
+                tgt_img_in_src = self.normalize(tgt_img_in_src, **self.norm_cfg)
 
-            for i in range(batch_size):
-                save_image(img[i], "/root/autodl-tmp/DAFormer/demo/src_after_norm" + str(i) + "_.png")
-                save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/tgt_after_norm" + str(i) + "_.png")
-                save_image(target_img_src_st[i], "/root/autodl-tmp/DAFormer/demo/tgt_in_src_after_norm" + str(i) + "_.png")
-
-            assert 1==0
+            # for i in range(batch_size):
+            #     save_image(img[i], "/root/autodl-tmp/DAFormer/demo/src_in_tgt_after_norm" + str(i) + "_.png")
+            #     save_image(target_img[i], "/root/autodl-tmp/DAFormer/demo/tgt_after_norm" + str(i) + "_.png")
+            #     save_image(tgt_img_in_src[i], "/root/autodl-tmp/DAFormer/demo/tgt_in_src_after_norm" + str(i) + "_.png")
 
         # Init/update ema model
         if self.local_iter == 0:
@@ -488,11 +584,24 @@ class MultiDA(UDADecorator):
 
         # Category contrast
         if self.enable_ctrst:
-            src_cl_loss = self.calculate_cl_loss(src_fusefeat, src_feat_cls, src_cam_19_masked, gt_semantic_seg)
+            # src_cl_loss = self.calculate_cl_loss(src_fusefeat, src_feat_cls, src_cam_19_masked, gt_semantic_seg)
+            # log_vars['src.cl_loss'] = 0.0
+            # if src_cl_loss != 0:
+            #     log_vars['src.cl_loss'] = src_cl_loss.item()
+            #     src_cl_loss = src_cl_loss * self.ctrst_lambda
+            #     src_cl_loss.backward(retain_graph=True)
+            with torch.no_grad():
+                protos_s = self.calc_proto(gt_semantic_seg, src_fusefeat.clone())
+                # Init protos
+                if self.local_iter == 0:
+                    self.protos = protos_s
+                self.protos = self.protos.detach()
+            
+            src_cl_loss = self.calc_cl_loss_wo_cam(src_fusefeat.clone(), gt_semantic_seg)
             log_vars['src.cl_loss'] = 0.0
-            if src_cl_loss != 0:
+            if src_cl_loss > 0:
                 log_vars['src.cl_loss'] = src_cl_loss.item()
-                src_cl_loss = src_cl_loss * self.ctrst_lambda
+                src_cl_loss = self.ctrst_lambda * src_cl_loss
                 src_cl_loss.backward(retain_graph=True)
         
         if self.print_grad_magnitude:
@@ -573,19 +682,37 @@ class MultiDA(UDADecorator):
         # (B,H,W)
         gt_pixel_weight = torch.ones((pseudo_weight.shape), device=dev)
 
-        # Train on target image in source style
-        tgt_src_st_losses = self.get_model().forward_train(
-            target_img_src_st, img_metas, pseudo_label, pseudo_weight)
+        if self.enable_st_consistency:
+            # Train on source image in target style
+            if self.enable_src_in_tgt:
+                src_in_tgt_losses = self.get_model().forward_train(
+                    src_img_in_tgt, img_metas, gt_semantic_seg)
 
-        tgt_src_st_losses = add_prefix(tgt_src_st_losses, 'tgt_src_st')
-        tgt_src_st_loss, tgt_src_st_log_vars = self._parse_losses(tgt_src_st_losses)
-        log_vars.update(tgt_src_st_log_vars)
-        tgt_src_st_loss = self.fft_lambda * tgt_src_st_loss
-        tgt_src_st_loss.backward(retain_graph=True)
+                src_in_tgt_losses = add_prefix(src_in_tgt_losses, 'src_in_tgt')
+                src_in_tgt_loss, src_in_tgt_log_vars = self._parse_losses(src_in_tgt_losses)
+                log_vars.update(src_in_tgt_log_vars)
+                src_in_tgt_loss = self.st_consistency_lambda * src_in_tgt_loss
+                src_in_tgt_loss.backward()
+    
+            # Train on target image in source style
+            if self.enable_tgt_in_src:
+                print("enter here")
+                assert 1==0
+                tgt_in_src_losses = self.get_model().forward_train(
+                    tgt_img_in_src, img_metas, pseudo_label.unsqueeze(1), pseudo_weight)
+
+                tgt_in_src_losses = add_prefix(tgt_in_src_losses, 'tgt_in_src')
+                tgt_in_src_loss, tgt_in_src_log_vars = self._parse_losses(tgt_in_src_losses)
+                log_vars.update(tgt_in_src_log_vars)
+                tgt_in_src_loss = self.st_consistency_lambda * tgt_in_src_loss
+                tgt_in_src_loss.backward()
 
         # Apply mixing
         mixed_img, mixed_lbl = [None] * batch_size, [None] * batch_size
-        mix_masks = get_class_masks(gt_semantic_seg)
+        if self.enable_rcm:
+            mix_masks = get_class_masks(gt_semantic_seg, self.rare_class_mix)
+        else:
+            mix_masks = get_class_masks(gt_semantic_seg)
         src_lbl_retain, tgt_lbl_retain = [None] * batch_size, [None] * batch_size
         src_weight_retain, tgt_weight_retain = [None] * batch_size, [None] * batch_size
 
@@ -598,40 +725,42 @@ class MultiDA(UDADecorator):
             _, pseudo_weight[i] = strong_transform(
                 strong_parameters,
                 target=torch.stack((gt_pixel_weight[i], pseudo_weight[i])))
-            # Calculate retained label of source and target
-            # (1,1,H,W)
-            src_lbl_retain[i], tgt_lbl_retain[i] = lbl_retain(
-                strong_parameters['mix'],
-                torch.stack((gt_semantic_seg[i][0], pseudo_label[i]))
-            )
-            src_weight_retain, tgt_weight_retain = weight_retain(
-                strong_parameters['mix'],
-                torch.stack((gt_pixel_weight[i], pseudo_weight[i]))
-            )
+            if self.enable_adver:
+                # Calculate retained label of source and target
+                # (1,1,H,W)
+                src_lbl_retain[i], tgt_lbl_retain[i] = lbl_retain(
+                    strong_parameters['mix'],
+                    torch.stack((gt_semantic_seg[i][0], pseudo_label[i]))
+                )
+                src_weight_retain, tgt_weight_retain = weight_retain(
+                    strong_parameters['mix'],
+                    torch.stack((gt_pixel_weight[i], pseudo_weight[i]))
+                )
         mixed_img = torch.cat(mixed_img)
         mixed_lbl = torch.cat(mixed_lbl)
-        # (B,1,H,W)
-        src_lbl_retain = torch.cat(src_lbl_retain)
-        tgt_lbl_retain = torch.cat(tgt_lbl_retain)
-        # (B,C,H,W)
-        src_lbl_retain = get_one_hot(src_lbl_retain, self.num_classes)
-        tgt_lbl_retain = get_one_hot(tgt_lbl_retain, self.num_classes)
-        mix_lbl_onehot = get_one_hot(mixed_lbl, self.num_classes)
-        # Segmentation retained label -> (B,C,H,W)
-        src_lbl_retain = (src_lbl_retain * src_weight_retain).detach()
-        tgt_lbl_retain = (tgt_lbl_retain * tgt_weight_retain).detach()
-        mix_lbl_onehot = mix_lbl_onehot * pseudo_weight.unsqueeze(1)
-        # Classification retained label -> (B,C,C)
-        src_sum = src_lbl_retain.view(b,c,-1).sum(dim=2).float()
-        tgt_sum = tgt_lbl_retain.view(b,c,-1).sum(dim=2).float()
-        mix_sum = mix_lbl_onehot.view(b,c,-1).sum(dim=2).float()
-        # (B,C)
-        src_cls_retain = (src_sum / mix_sum).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
-        tgt_cls_retain = (tgt_sum / mix_sum).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
-        mix_cls_lbl = src_cls_retain + tgt_cls_retain
-        # (B,C,C)
-        src_cls_retain = get_one_hot_cls(src_cls_retain, src_cls_retain.shape[1]).detach()
-        tgt_cls_retain = get_one_hot_cls(tgt_cls_retain, tgt_cls_retain.shape[1]).detach()
+        if self.enable_adver:
+            # (B,1,H,W)
+            src_lbl_retain = torch.cat(src_lbl_retain)
+            tgt_lbl_retain = torch.cat(tgt_lbl_retain)
+            # (B,C,H,W)
+            src_lbl_retain = get_one_hot(src_lbl_retain, self.num_classes)
+            tgt_lbl_retain = get_one_hot(tgt_lbl_retain, self.num_classes)
+            mix_lbl_onehot = get_one_hot(mixed_lbl, self.num_classes)
+            # Segmentation retained label -> (B,C,H,W)
+            src_lbl_retain = (src_lbl_retain * src_weight_retain).detach()
+            tgt_lbl_retain = (tgt_lbl_retain * tgt_weight_retain).detach()
+            mix_lbl_onehot = mix_lbl_onehot * pseudo_weight.unsqueeze(1)
+            # Classification retained label -> (B,C,C)
+            src_sum = src_lbl_retain.view(b,c,-1).sum(dim=2).float()
+            tgt_sum = tgt_lbl_retain.view(b,c,-1).sum(dim=2).float()
+            mix_sum = mix_lbl_onehot.view(b,c,-1).sum(dim=2).float()
+            # (B,C)
+            src_cls_retain = (src_sum / mix_sum).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
+            tgt_cls_retain = (tgt_sum / mix_sum).nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
+            mix_cls_lbl = src_cls_retain + tgt_cls_retain
+            # (B,C,C)
+            src_cls_retain = get_one_hot_cls(src_cls_retain, src_cls_retain.shape[1]).detach()
+            tgt_cls_retain = get_one_hot_cls(tgt_cls_retain, tgt_cls_retain.shape[1]).detach()
 
         with torch.no_grad():
             # y_19 -- multi-hot cls prediction (B, 19)
@@ -644,13 +773,30 @@ class MultiDA(UDADecorator):
 
         # Train on mixed images
         mix_losses = self.get_model().forward_train(
-            mixed_img, img_metas, mixed_lbl, pseudo_weight, return_feat=True)
+            mixed_img, img_metas, mixed_lbl, pseudo_weight, return_feat=True, return_fusefeat=True)
         mix_feat = mix_losses.pop('features')
+        mix_fusefeat = mix_losses.pop('fusefeatures')
 
         mix_losses = add_prefix(mix_losses, 'mix')
         mix_loss, mix_log_vars = self._parse_losses(mix_losses)
         log_vars.update(mix_log_vars)
         mix_loss.backward(retain_graph=True)
+
+        if self.enable_ctrst:
+            mix_cl_loss = self.calc_cl_loss_wo_cam(mix_fusefeat.clone(), mixed_lbl, pseudo_weight.unsqueeze(1))
+            log_vars['mix.cl_loss'] = 0.0
+            if mix_cl_loss > 0:
+                log_vars['mix.cl_loss'] = mix_cl_loss.item()
+                mix_cl_loss = self.ctrst_lambda * mix_cl_loss
+                mix_cl_loss.backward()
+            
+            with torch.no_grad():
+                protos_m, q_protos_m = self.calc_proto(mixed_lbl, mix_fusefeat.clone(), pseudo_weight.unsqueeze(1))
+                # Update protos
+                mix_proto_alpha = self.mix_proto_alpha * q_protos_m # (19, 1)
+                protos_cur = (1 - mix_proto_alpha) * protos_s + mix_proto_alpha * protos_m
+                proto_alpha = min(1 - 1 / (self.local_iter + 1), self.alpha)
+                self.protos = proto_alpha * self.protos + (1 - proto_alpha) * protos_cur
 
         if self.enable_px_d:
             px_adv_losses = self.px_d_model.forward(
@@ -678,72 +824,73 @@ class MultiDA(UDADecorator):
             img_adv_loss = self.img_adv_lambda * (img_adv_loss / 4)
             img_adv_loss.backward()
 
-        # Train D
+        if self.enable_adver:
+            # Train D
 
-        # Bring back requires_grad
-        if self.enable_px_d:
-            for param in self.px_d_model.parameters():
-                param.requires_grad = True
-        if self.enable_img_d:
-            for param in self.img_d_model.parameters():
-                param.requires_grad = True        
+            # Bring back requires_grad
+            if self.enable_px_d:
+                for param in self.px_d_model.parameters():
+                    param.requires_grad = True
+            if self.enable_img_d:
+                for param in self.img_d_model.parameters():
+                    param.requires_grad = True        
 
-        # Train on source images
-        # Block gradients back to the segmentation network
-        src_feat = src_feat[-1].detach()    
+            # Train on source images
+            # Block gradients back to the segmentation network
+            src_feat = src_feat[-1].detach()    
 
-        if self.enable_px_d:
-            px_losses = self.px_d_model.forward(
-                src_feat, torch.cat((src_seg_gt, torch.zeros_like(src_seg_gt)), dim=1)
-            )
+            if self.enable_px_d:
+                px_losses = self.px_d_model.forward(
+                    src_feat, torch.cat((src_seg_gt, torch.zeros_like(src_seg_gt)), dim=1)
+                )
 
-            px_losses = add_prefix(px_losses, 'src')
-            px_loss, px_log_vars = self._parse_losses(px_losses)
-            log_vars.update(px_log_vars)
+                px_losses = add_prefix(px_losses, 'src')
+                px_loss, px_log_vars = self._parse_losses(px_losses)
+                log_vars.update(px_log_vars)
 
-            px_loss = px_loss / 2
-            px_loss.backward(retain_graph=True)
+                px_loss = px_loss / 2
+                px_loss.backward(retain_graph=True)
 
-        if self.enable_img_d:
-            img_losses = self.img_d_model.forward(
-                src_feat, src_cam_19, src_cls_gt,
-                torch.cat((src_cls_gt_one_hot, torch.zeros_like(src_cls_gt_one_hot)), dim=2)
-            )
+            if self.enable_img_d:
+                img_losses = self.img_d_model.forward(
+                    src_feat, src_cam_19, src_cls_gt,
+                    torch.cat((src_cls_gt_one_hot, torch.zeros_like(src_cls_gt_one_hot)), dim=2)
+                )
 
-            img_losses = add_prefix(img_losses, 'src')
-            img_loss, img_log_vars = self._parse_losses(img_losses)
-            log_vars.update(img_log_vars)
+                img_losses = add_prefix(img_losses, 'src')
+                img_loss, img_log_vars = self._parse_losses(img_losses)
+                log_vars.update(img_log_vars)
 
-            img_loss = img_loss / 2
-            img_loss.backward()
+                img_loss = img_loss / 2
+                img_loss.backward()
 
-        # Train on mix images
-        mix_feat = mix_feat[-1].detach()
+            # Train on mix images
+            mix_feat = mix_feat[-1].detach()
 
-        if self.enable_px_d:
-            px_losses = self.px_d_model.forward(
-                mix_feat, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1)
-            )
+            if self.enable_px_d:
+                px_losses = self.px_d_model.forward(
+                    mix_feat, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1)
+                )
 
-            px_losses = add_prefix(px_losses, 'mix')
-            px_loss, px_log_vars = self._parse_losses(px_losses)
-            log_vars.update(px_log_vars)
+                px_losses = add_prefix(px_losses, 'mix')
+                px_loss, px_log_vars = self._parse_losses(px_losses)
+                log_vars.update(px_log_vars)
 
-            px_loss = px_loss / 2
-            px_loss.backward(retain_graph=True)
+                px_loss = px_loss / 2
+                px_loss.backward(retain_graph=True)
 
-        if self.enable_img_d:
-            img_losses = self.img_d_model.forward(
-                mix_feat, mix_cam_19, mix_cls_lbl,
-                torch.cat((src_cls_retain, tgt_cls_retain), dim=2)
-            )
+            if self.enable_img_d:
+                img_losses = self.img_d_model.forward(
+                    mix_feat, mix_cam_19, mix_cls_lbl,
+                    torch.cat((src_cls_retain, tgt_cls_retain), dim=2)
+                )
 
-            img_losses = add_prefix(img_losses, 'mix')
-            img_loss, img_log_vars = self._parse_losses(img_losses)
-            log_vars.update(img_log_vars)
+                img_losses = add_prefix(img_losses, 'mix')
+                img_loss, img_log_vars = self._parse_losses(img_losses)
+                log_vars.update(img_log_vars)
 
-            img_loss = img_loss / 2
-            img_loss.backward()
+                img_loss = img_loss / 2
+                img_loss.backward()
 
         if self.local_iter % self.debug_img_interval == 0:
             out_dir = os.path.join(self.train_cfg['work_dir'],
