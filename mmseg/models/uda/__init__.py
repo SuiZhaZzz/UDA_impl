@@ -6,5 +6,6 @@
 from mmseg.models.uda.dacs import DACS
 from .gan import GAN
 from .multi_da import MultiDA
+from .baseline import BASELINE
 
-__all__ = ['DACS', 'GAN', 'MultiDA']
+__all__ = ['DACS', 'GAN', 'MultiDA', 'BASELINE']

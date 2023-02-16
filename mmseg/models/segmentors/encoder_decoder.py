@@ -69,18 +69,26 @@ class EncoderDecoder(BaseSegmentor):
             x = self.neck(x)
         return x
 
-    def encode_decode(self, img, img_metas, return_feat=False):
+    def encode_decode(self, img, img_metas, return_fusefeat=False, return_out=False):
         """Encode images with backbone and decode into a semantic segmentation
         map of the same size as input."""
         x = self.extract_feat(img)
+        if return_fusefeat and return_out:
+            out_b4, fusefeat = self._decode_head_forward_test(x, img_metas, return_feat=return_fusefeat)
+            out = resize(
+                input=out_b4,
+                size=img.shape[2:],
+                mode='bilinear',
+                align_corners=self.align_corners)
+            return out, fusefeat, out_b4
+
         out = self._decode_head_forward_test(x, img_metas)
         out = resize(
             input=out,
             size=img.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
-        if return_feat:
-            return out, x
+
         return out
 
     def _decode_head_forward_train(self,
@@ -88,11 +96,21 @@ class EncoderDecoder(BaseSegmentor):
                                    img_metas,
                                    gt_semantic_seg,
                                    seg_weight=None,
-                                   return_feat=False):
+                                   return_feat=False,
+                                   return_out=False):
         """Run forward function and calculate loss for decode head in
         training."""
         losses = dict()
-        if return_feat:
+        if return_feat and return_out:
+            loss_decode, feat, out = self.decode_head.forward_train(x, img_metas,
+                                                     gt_semantic_seg,
+                                                     self.train_cfg,
+                                                     seg_weight,
+                                                     return_feat=return_feat,
+                                                     return_out=return_out)
+            losses.update(add_prefix(loss_decode, 'decode'))
+            return losses, feat, out
+        elif return_feat:
             loss_decode, feat = self.decode_head.forward_train(x, img_metas,
                                                      gt_semantic_seg,
                                                      self.train_cfg,
@@ -100,6 +118,14 @@ class EncoderDecoder(BaseSegmentor):
                                                      return_feat=return_feat)
             losses.update(add_prefix(loss_decode, 'decode'))
             return losses, feat
+        elif return_out:
+            loss_decode, out = self.decode_head.forward_train(x, img_metas,
+                                                     gt_semantic_seg,
+                                                     self.train_cfg,
+                                                     seg_weight,
+                                                     return_out=return_out)
+            losses.update(add_prefix(loss_decode, 'decode'))
+            return losses, out
 
         loss_decode = self.decode_head.forward_train(x, img_metas,
                                                      gt_semantic_seg,
@@ -125,9 +151,13 @@ class EncoderDecoder(BaseSegmentor):
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses, pred
 
-    def _decode_head_forward_test(self, x, img_metas):
+    def _decode_head_forward_test(self, x, img_metas, return_feat=False):
         """Run forward function and calculate loss for decode head in
         inference."""
+        if return_feat:
+            seg_logits, feat = self.decode_head.forward_test(x, img_metas, self.test_cfg, return_feat=return_feat)
+            return seg_logits, feat
+
         seg_logits = self.decode_head.forward_test(x, img_metas, self.test_cfg)
         return seg_logits
 
@@ -164,7 +194,8 @@ class EncoderDecoder(BaseSegmentor):
                       gt_semantic_seg,
                       seg_weight=None,
                       return_feat=False,
-                      return_fusefeat=False):
+                      return_fusefeat=False,
+                      return_out=False):
         """Forward function for training.
 
         Args:
@@ -186,12 +217,26 @@ class EncoderDecoder(BaseSegmentor):
         if return_feat:
             losses['features'] = x
 
-        if return_fusefeat:
+        if return_fusefeat and return_out:
+            loss_decode, fusefeat, out = self._decode_head_forward_train(x, img_metas,
+                                                      gt_semantic_seg,
+                                                      seg_weight,
+                                                      return_feat=return_fusefeat,
+                                                      return_out=return_out)
+            losses['fusefeatures'] = fusefeat
+            losses['out'] = out
+        elif return_fusefeat:
             loss_decode, fusefeat = self._decode_head_forward_train(x, img_metas,
                                                       gt_semantic_seg,
                                                       seg_weight,
                                                       return_feat=return_fusefeat)
             losses['fusefeatures'] = fusefeat
+        elif return_out:
+            loss_decode, out = self._decode_head_forward_train(x, img_metas,
+                                                      gt_semantic_seg,
+                                                      seg_weight,
+                                                      return_out=return_out)
+            losses['out'] = out
         else:
             loss_decode = self._decode_head_forward_train(x, img_metas,
                                                       gt_semantic_seg,
