@@ -52,17 +52,18 @@ uda = dict(
     enable_mix_ss_ts = False,
     mix_consistency_lambda = 1,
     # Rare class mix
-    enable_rcm=True,
+    enable_rcm=False,
     rare_class_mix=[],
     # Normalize outside pipeline
     to_rgb = True,
     norm_cfg = dict(
         mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]),
     # Category contrast
-    enable_ctrst = False,
-    ctrst_lambda = 0.5,
-    rare_class_id = [4,5,6,7,11,12,13,14,15,16,17,18],
     temperature=0.2,
-    mix_proto_alpha=0.5
+    mix_proto_alpha=0.5,
+    enable_ctrst_feat = False,
+    enable_ctrst_out = False,
+    ctrst_feat_lambda = 0.5,
+    ctrst_out_lambda = 0.5,
 )
 use_ddp_wrapper = True

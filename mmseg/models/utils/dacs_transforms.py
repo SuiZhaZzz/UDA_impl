@@ -100,7 +100,6 @@ def get_class_masks(labels, rcm=None):
         if rcm != None:
             classes = torch.cat((classes, rcm))
             classes = torch.unique(classes)
-            print(classes)
         class_masks.append(generate_class_mask(label, classes).unsqueeze(0))
     return class_masks
 

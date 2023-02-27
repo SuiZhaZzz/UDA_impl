@@ -8,8 +8,6 @@ def soft_label_cross_entropy(pred, soft_label, pixel_weights=None):
         return torch.mean(torch.sum(loss, dim=1))
     return torch.mean(pixel_weights*torch.sum(loss, dim=1))
 
-
-
 class FCDiscriminatorWoCls(nn.Module):
     def __init__(self, num_classes=19, ndf=64):
         super(FCDiscriminatorWoCls, self).__init__()
@@ -54,7 +52,7 @@ class FCDiscriminatorWoCls(nn.Module):
         return losses
 
 class PixelDiscriminator(nn.Module):
-    def __init__(self, input_nc=512, ndf=512, num_classes=19):
+    def __init__(self, input_nc=256, ndf=512, num_classes=19):
         super(PixelDiscriminator, self).__init__()
 
         self.D = nn.Sequential(
@@ -66,7 +64,7 @@ class PixelDiscriminator(nn.Module):
         self.cls1 = nn.Conv2d(ndf//2, num_classes, kernel_size=3, stride=1, padding=1)
         self.cls2 = nn.Conv2d(ndf//2, num_classes, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, x, gt, return_inv=False):
+    def forward(self, x, gt, weights=None, return_inv=False):
         b,_,h,w = gt.shape
         size = gt.shape[-2:]
         losses = dict()
@@ -80,7 +78,7 @@ class PixelDiscriminator(nn.Module):
             tgt_out = F.interpolate(tgt_out, size=size, mode='bilinear', align_corners=True)
 
         out = torch.cat((src_out, tgt_out), dim=1)
-        loss = soft_label_cross_entropy(out, gt)
+        loss = soft_label_cross_entropy(out, gt, weights)
         losses['loss_px_dis'] = loss
 
         acc = (out.argmax(dim=1)==gt.argmax(dim=1)).sum().float()
@@ -89,17 +87,17 @@ class PixelDiscriminator(nn.Module):
 
         if return_inv:
             out = torch.cat((tgt_out, src_out), dim=1)
-            loss_inv = soft_label_cross_entropy(out, gt)
+            loss_inv = soft_label_cross_entropy(out, gt, weights)
             losses['loss_px_dis_inv'] = loss_inv
 
         return losses
 
 class ImageDiscriminator(nn.Module):
-    def __init__(self, num_classes=19):
+    def __init__(self, input_nc=256, num_classes=19):
         super(ImageDiscriminator, self).__init__()
 
         self.D = nn.Sequential(
-            nn.Linear(512, 2048),
+            nn.Linear(input_nc, 2048),
             nn.LeakyReLU(negative_slope=0.2, inplace=True),
             nn.Linear(2048,512),
             nn.LeakyReLU(negative_slope=0.2, inplace=True)
@@ -110,8 +108,8 @@ class ImageDiscriminator(nn.Module):
 
         self.num_classes = num_classes
 
-    def forward(self, x, cam, gt, gt_2k, return_inv=False):
-        # x -- (b, 512, h, w)
+    def forward(self, x, cam, gt, gt_2k, weights=None, return_inv=False):
+        # x -- (b, 256, h, w)
         # cam -- (b, 19, h, w)
         assert cam.size(1) == self.num_classes, 'cam.size(1) != num_class'
 
@@ -119,18 +117,19 @@ class ImageDiscriminator(nn.Module):
         size = x.shape[-2:]
         
         cam = F.interpolate(cam, size=size, mode='bilinear', align_corners=True).detach()
-        cams_feature = cam.unsqueeze(2)*x.unsqueeze(1) # bs*19*512*h*w
+        cams_feature = cam.unsqueeze(2)*x.unsqueeze(1) # bs*19*256*h*w
         cams_feature = cams_feature.view(cams_feature.size(0),cams_feature.size(1),cams_feature.size(2),-1) 
-        cams_feature = torch.mean(cams_feature,-1) # b*19*512*1
-        cams_feature = cams_feature.reshape(batch_size, self.num_classes, -1) # b*19*512
+        cams_feature = torch.mean(cams_feature,-1) # b*19*256*1
+        cams_feature = cams_feature.reshape(batch_size, self.num_classes, -1) # b*19*256
 
         mask = gt > 0
-        feature_list = [cams_feature[i][mask[i]] for i in range(batch_size)] # b*n*512
+        feature_list = [cams_feature[i][mask[i]] for i in range(batch_size)] # b*n*256
         out = [self.D(y) for y in feature_list]
         src_out = [self.cls1(y) for y in out]
         tgt_out = [self.cls2(y) for y in out]   # b*n*19
         # labels = [torch.nonzero(gt_2k[i]).squeeze(1) for i in range(gt_2k.shape[0])]
         labels = [gt_2k[i][mask[i]] for i in range(batch_size)]  # b*n*38
+        weight_ls = [weights[i][mask[i]] for i in range(batch_size)] # b*n
 
         losses = dict()
         loss = 0
@@ -139,18 +138,18 @@ class ImageDiscriminator(nn.Module):
         cnt = 0
 
         # n*19
-        for src_logit, tgt_logit, label in zip(src_out, tgt_out, labels):
+        for src_logit, tgt_logit, label, weight in zip(src_out, tgt_out, labels, weight_ls):
             if label.sum() == 0:
                 continue
             cnt += label.sum()
             out = torch.cat((src_logit, tgt_logit), dim=1)
-            loss += soft_label_cross_entropy(out, label)
+            loss += soft_label_cross_entropy(out, label, weight)
 
             acc += (out.argmax(dim=1)==label.argmax(dim=1)).sum().float()
 
             if return_inv:
                 out = torch.cat((tgt_logit, src_logit), dim=-1)
-                loss_inv += soft_label_cross_entropy(out, label)
+                loss_inv += soft_label_cross_entropy(out, label, weight)
         
         losses['loss_img_dis'] = loss / batch_size
         losses['acc_img_dis'] = (acc / cnt) * 100.0

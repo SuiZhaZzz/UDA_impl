@@ -123,8 +123,8 @@ class MultiDA(UDADecorator):
         self.src_lbl = 0
         self.tgt_lbl = 1
 
-
         self.enable_adver = False
+
         # TODO: Task level discriminator
 
         # Pixel level discriminator
@@ -173,13 +173,21 @@ class MultiDA(UDADecorator):
             self.rare_class_mix = cfg['rare_class_mix']
 
         # Category contrast
-        self.enable_ctrst = cfg['enable_ctrst']
-        self.ctrst_lambda = cfg['ctrst_lambda']
-        self.rare_class_id = cfg['rare_class_id']
-        self.temperature = cfg['temperature']
-        self.mix_proto_alpha = cfg['mix_proto_alpha']
-        self.protos = torch.rand(self.num_classes, 256).cuda()
-            
+        self.enable_ctrst_feat = cfg['enable_ctrst_feat']
+        if self.enable_ctrst_feat:
+            self.protos_feat = torch.rand(self.num_classes, 256).cuda()
+            self.ctrst_feat_lambda = cfg['ctrst_feat_lambda']
+
+        self.enable_ctrst_out = cfg['enable_ctrst_out']
+        if self.enable_ctrst_out:
+            self.protos_out = torch.rand(self.num_classes, 19).cuda()
+            self.ctrst_out_lambda = cfg['ctrst_out_lambda']
+
+        if self.enable_ctrst_feat or self.enable_ctrst_out:
+            # self.rare_class_id = cfg['rare_class_id']
+            self.temperature = cfg['temperature']
+            self.mix_proto_alpha = cfg['mix_proto_alpha']
+
     def get_ema_model(self):
         return get_module(self.ema_model)
 
@@ -337,7 +345,7 @@ class MultiDA(UDADecorator):
             q_protos = torch.zeros(self.num_classes, 1).cuda()
 
         b, c, _, _ = feat.shape
-        protos = torch.rand(self.num_classes, c).cuda()
+        protos = torch.zeros(self.num_classes, c).cuda()
 
         for i in range(self.num_classes):
             mask = (label == i) # (B,1,H,W)
@@ -348,26 +356,61 @@ class MultiDA(UDADecorator):
             feat_i = feat * mask # (B, C, H, W)
             proto = torch.sum(feat_i, dim=[-2, -1]) / sz # (B, C)
             proto = proto.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
-            proto = torch.sum(proto, dim=0) / cnt # (C)
-            protos[i] = proto
-        
+
             if q != None:
                 q_i = q * mask
                 q_i = torch.sum(q_i, dim=[-2, -1]) / sz # (B, 1)
                 q_i = q_i.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+                
+                q_i_soft = torch.softmax(q_i, dim=0)
+                proto = torch.sum(proto * q_i_soft, dim=0)
+
                 q_i = torch.sum(q_i, dim=0) / cnt # (1)
                 q_protos[i] = q_i
+            else:
+                proto = torch.sum(proto, dim=0) / cnt # (C)
+            
+            protos[i] = proto
 
         if q != None:
             return protos, q_protos
 
         return protos
+
+    def calc_proto_mix(self, label, feat, q=None):
+        # label: (B, 1, H, W) / feat: (B, C, H', W') / q: (B, 1, H, W)
+
+        # Downsample
+        label = downscale_label_ratio(label, label.shape[-1]//feat.shape[-1], 0.75, 19)
+        if q != None:
+            q = F.avg_pool2d(q, kernel_size=q.shape[-1]//feat.shape[-1])
+
+        b, c, _, _ = feat.shape
+        protos = torch.rand(self.num_classes, c).cuda()
+
+        feat = feat.permute(1, 0, 2, 3) # (C, B, H, W)
+
+        for i in range(self.num_classes):
+            mask = (label == i) # (B,1,H,W)
+            sz = torch.sum(mask, dim=[-2,-1]) # (B, 1)
+            cnt = torch.sum(sz > 0)
+            if cnt == 0:
+                continue
+            feat_i = feat * mask # (B, C, H, W)
+            if q != None:
+                feat_i = feat_i * q
+            proto = torch.sum(feat_i, dim=[-2, -1]) / sz # (B, C)
+            proto = proto.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
+            proto = torch.sum(proto, dim=0) / cnt # (C)
+            protos[i] = proto
+
+        return protos
         
-    def calc_cl_loss_wo_cam(self, feat, label, q=None):
+    def calc_cl_loss_feat(self, feat, label, q=None):
         # protos: (19, C) / feat: (B, C, H', W') / label: (B, 1, H, W) / q: (B, 1, H, W)
 
-        assert self.protos.dim() == 2
-        assert self.protos.shape[1] == feat.shape[1]
+        assert self.protos_feat.dim() == 2
+        assert self.protos_feat.shape[1] == feat.shape[1]
         b, c, _, _ = feat.shape
 
         # Downsample
@@ -382,31 +425,78 @@ class MultiDA(UDADecorator):
         losses = []
 
         for i in range(self.num_classes):
-            if i in self.rare_class_id:
-                mask = (label == i) # (B,1,H,W)
-                mask = mask.squeeze(1) # (B, H, W)
+            mask = (label == i) # (B,1,H,W)
+            mask = mask.squeeze(1) # (B, H, W)
 
-                v = feat[:, mask] # (C, N)
-                v = v.permute(1, 0) # (N, C)
-                n = v.shape[0] 
-                if n == 0:
-                    continue
-                # v_vplus = v.mm(protos[i].unsqueeze(1)) # (n,C)*(C,1)=(n,1)
-                v_vplus = torch.cosine_similarity(v, self.protos[i].unsqueeze(0), dim=1) # (n,C) (n,1) => (n)
-                v_vplus = torch.exp(v_vplus / self.temperature)
-                # v_vsub = v.mm(protos.permute(1, 0)) # (n, 19)
-                v_vsub = torch.cosine_similarity(v.unsqueeze(1), self.protos.unsqueeze(0), dim=2) # (n,1,C) (1,19,C) => (n,19)
-                v_vsub =  torch.exp(v_vsub / self.temperature)
-                v_vsub = torch.sum(v_vsub, dim=1) # (n)
-                loss = v_vplus / v_vsub # (n)
-                loss = -torch.log(loss)
+            v = feat[:, mask] # (C, N)
+            v = v.permute(1, 0) # (N, C)
+            n = v.shape[0] 
+            if n == 0:
+                continue
+            # v_vplus = v.mm(protos[i].unsqueeze(1)) # (n,C)*(C,1)=(n,1)
+            v_vplus = torch.cosine_similarity(v, self.protos_feat[i].unsqueeze(0), dim=1) # (n,C) (n,1) => (n)
+            v_vplus = torch.exp(v_vplus / self.temperature)
+            # v_vsub = v.mm(protos.permute(1, 0)) # (n, 19)
+            v_vsub = torch.cosine_similarity(v.unsqueeze(1), self.protos_feat.unsqueeze(0), dim=2) # (n,1,C) (1,19,C) => (n,19)
+            v_vsub =  torch.exp(v_vsub / self.temperature)
+            v_vsub = torch.sum(v_vsub, dim=1) # (n)
+            loss = v_vplus / v_vsub # (n)
+            loss = -torch.log(loss)
                 
-                if q != None:
-                    q_i = q[mask] # (n)
-                    loss = loss * q_i
+            if q != None:
+                q_i = q[mask] # (n)
+                loss = loss * q_i
 
-                loss = torch.mean(loss)
-                losses.append(loss)
+            loss = torch.mean(loss)
+            losses.append(loss)
+
+        if len(losses) == 0:
+            return 0
+        return sum(losses) / len(losses)
+
+    def calc_cl_loss_out(self, feat, label, q=None):
+        # protos: (19, C) / feat: (B, C, H', W') / label: (B, 1, H, W) / q: (B, 1, H, W)
+
+        assert self.protos_out.dim() == 2
+        assert self.protos_out.shape[1] == feat.shape[1]
+        b, c, _, _ = feat.shape
+
+        # Downsample
+        label = downscale_label_ratio(label, label.shape[-1]//feat.shape[-1], 0.75, 19)
+        if q != None:
+            q = F.avg_pool2d(q, kernel_size=q.shape[-1]//feat.shape[-1])
+            q = q.squeeze(1) # (B,H,W)
+
+        feat = feat.permute(1, 0, 2, 3) # (C, B, H, W)
+        # feat = feat.view(c, -1) # (C, B*H*W)
+        
+        losses = []
+
+        for i in range(self.num_classes):
+            mask = (label == i) # (B,1,H,W)
+            mask = mask.squeeze(1) # (B, H, W)
+
+            v = feat[:, mask] # (C, N)
+            v = v.permute(1, 0) # (N, C)
+            n = v.shape[0] 
+            if n == 0:
+                continue
+            # v_vplus = v.mm(protos[i].unsqueeze(1)) # (n,C)*(C,1)=(n,1)
+            v_vplus = torch.cosine_similarity(v, self.protos_out[i].unsqueeze(0), dim=1) # (n,C) (n,1) => (n)
+            v_vplus = torch.exp(v_vplus / self.temperature)
+            # v_vsub = v.mm(protos.permute(1, 0)) # (n, 19)
+            v_vsub = torch.cosine_similarity(v.unsqueeze(1), self.protos_out.unsqueeze(0), dim=2) # (n,1,C) (1,19,C) => (n,19)
+            v_vsub =  torch.exp(v_vsub / self.temperature)
+            v_vsub = torch.sum(v_vsub, dim=1) # (n)
+            loss = v_vplus / v_vsub # (n)
+            loss = -torch.log(loss)
+                
+            if q != None:
+                q_i = q[mask] # (n)
+                loss = loss * q_i
+
+            loss = torch.mean(loss)
+            losses.append(loss)
 
         if len(losses) == 0:
             return 0
@@ -479,15 +569,17 @@ class MultiDA(UDADecorator):
             target_img_metas = self.init_norm_param(target_img_metas)
 
             # for i in range(batch_size):
-            #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/src_before_norm" + str(i) + "_.png")
-            #     save_image(target_img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/tgt_before_norm" + str(i) + "_.png")
+            #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/a_src_" + str(i) + ".png")
+            #     save_image(target_img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/a_tgt_" + str(i) + ".png")
 
             if self.enable_src_in_tgt_b4_train:
                 img = FDA_source_to_target(img, target_img, L=self.fft_beta).cuda()
 
-            for i in range(batch_size):
-                save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/src_in_tgt_before_norm" + str(i) + "_.png")
+            # for i in range(batch_size):
+            #     save_image(img[i] / 255.0, "/root/autodl-tmp/DAFormer/demo/a_src_in_tgt_" + str(i) + ".png")
 
+            # assert 1==0
+            
             if self.enable_src_in_tgt:
                 src_img_in_tgt = FDA_source_to_target(img, target_img, L=self.fft_beta).cuda()
             if self.enable_tgt_in_src:
@@ -572,37 +664,16 @@ class MultiDA(UDADecorator):
 
         # Train on source images
         clean_losses = self.get_model().forward_train(
-            img, img_metas, gt_semantic_seg, return_feat=True, return_fusefeat=True)
+            img, img_metas, gt_semantic_seg, return_feat=True, return_fusefeat=True, return_out=True)
         src_feat = clean_losses.pop('features')
         src_fusefeat = clean_losses.pop('fusefeatures')
+        src_out = clean_losses.pop('out')
 
         clean_losses = add_prefix(clean_losses, 'src')
         clean_loss, clean_log_vars = self._parse_losses(clean_losses)
         log_vars.update(clean_log_vars)
         # Source Segmentation loss
         clean_loss.backward(retain_graph=self.enable_fdist)
-
-        # Category contrast
-        if self.enable_ctrst:
-            # src_cl_loss = self.calculate_cl_loss(src_fusefeat, src_feat_cls, src_cam_19_masked, gt_semantic_seg)
-            # log_vars['src.cl_loss'] = 0.0
-            # if src_cl_loss != 0:
-            #     log_vars['src.cl_loss'] = src_cl_loss.item()
-            #     src_cl_loss = src_cl_loss * self.ctrst_lambda
-            #     src_cl_loss.backward(retain_graph=True)
-            with torch.no_grad():
-                protos_s = self.calc_proto(gt_semantic_seg, src_fusefeat.clone())
-                # Init protos
-                if self.local_iter == 0:
-                    self.protos = protos_s
-                self.protos = self.protos.detach()
-            
-            src_cl_loss = self.calc_cl_loss_wo_cam(src_fusefeat.clone(), gt_semantic_seg)
-            log_vars['src.cl_loss'] = 0.0
-            if src_cl_loss > 0:
-                log_vars['src.cl_loss'] = src_cl_loss.item()
-                src_cl_loss = self.ctrst_lambda * src_cl_loss
-                src_cl_loss.backward(retain_graph=True)
         
         if self.print_grad_magnitude:
             params = self.get_model().backbone.parameters()
@@ -643,7 +714,7 @@ class MultiDA(UDADecorator):
         if self.enable_fdist:
             feat_loss, feat_log = self.calc_feat_dist(img, gt_semantic_seg,
                                                       src_feat)
-            feat_loss.backward()
+            feat_loss.backward(retain_graph=True)
             log_vars.update(add_prefix(feat_log, 'src'))
             if self.print_grad_magnitude:
                 params = self.get_model().backbone.parameters()
@@ -654,14 +725,15 @@ class MultiDA(UDADecorator):
                 grad_mag = calc_grad_magnitude(fd_grads)
                 mmcv.print_log(f'Fdist Grad.: {grad_mag}', 'mmseg')
 
-        # Generate pseudo-label
         for m in self.get_ema_model().modules():
             if isinstance(m, _DropoutNd):
                 m.training = False
             if isinstance(m, DropPath):
                 m.training = False
-        ema_logits = self.get_ema_model().encode_decode(
-            target_img, target_img_metas)
+
+        # Generate pseudo-label
+        ema_logits, tgt_fusefeat_te, tgt_out_te = self.get_ema_model().encode_decode(
+            target_img, target_img_metas, return_fusefeat=True, return_out=True)
 
         ema_softmax = torch.softmax(ema_logits.detach(), dim=1)
         # (B, H, W)
@@ -681,31 +753,6 @@ class MultiDA(UDADecorator):
             pseudo_weight[:, -self.psweight_ignore_bottom:, :] = 0
         # (B,H,W)
         gt_pixel_weight = torch.ones((pseudo_weight.shape), device=dev)
-
-        if self.enable_st_consistency:
-            # Train on source image in target style
-            if self.enable_src_in_tgt:
-                src_in_tgt_losses = self.get_model().forward_train(
-                    src_img_in_tgt, img_metas, gt_semantic_seg)
-
-                src_in_tgt_losses = add_prefix(src_in_tgt_losses, 'src_in_tgt')
-                src_in_tgt_loss, src_in_tgt_log_vars = self._parse_losses(src_in_tgt_losses)
-                log_vars.update(src_in_tgt_log_vars)
-                src_in_tgt_loss = self.st_consistency_lambda * src_in_tgt_loss
-                src_in_tgt_loss.backward()
-    
-            # Train on target image in source style
-            if self.enable_tgt_in_src:
-                print("enter here")
-                assert 1==0
-                tgt_in_src_losses = self.get_model().forward_train(
-                    tgt_img_in_src, img_metas, pseudo_label.unsqueeze(1), pseudo_weight)
-
-                tgt_in_src_losses = add_prefix(tgt_in_src_losses, 'tgt_in_src')
-                tgt_in_src_loss, tgt_in_src_log_vars = self._parse_losses(tgt_in_src_losses)
-                log_vars.update(tgt_in_src_log_vars)
-                tgt_in_src_loss = self.st_consistency_lambda * tgt_in_src_loss
-                tgt_in_src_loss.backward()
 
         # Apply mixing
         mixed_img, mixed_lbl = [None] * batch_size, [None] * batch_size
@@ -771,32 +818,115 @@ class MultiDA(UDADecorator):
             # mix_cls_pred = y_19 * mask  # (B, 19)
             # mix_cam_19 = mix_cam_19 * mask.unsqueeze(-1).unsqueeze(-1)  # (B, 19, H, W)
 
+        # Update protos
+        mix_losses_te = self.get_ema_model().forward_train(mixed_img, img_metas, mixed_lbl, pseudo_weight, return_fusefeat=True, return_out=True)
+        mix_fusefeat_te = mix_losses_te.pop('fusefeatures')
+        mix_out_te = mix_losses_te.pop('out')
+
+        clean_losses_te = self.get_ema_model().forward_train(
+            img, img_metas, gt_semantic_seg, return_fusefeat=True, return_out=True)
+        src_fusefeat_te = clean_losses_te.pop('fusefeatures')
+        src_out_te = clean_losses_te.pop('out')
+
+        # if self.enable_ctrst_feat:
+        #     with torch.no_grad():
+        #         protos_feat_s = self.calc_proto(gt_semantic_seg, src_fusefeat_te.clone())
+        #         protos_feat_t, q_protos_feat_t = self.calc_proto(pseudo_label.unsqueeze(1), tgt_fusefeat_te.clone(), pseudo_weight.unsqueeze(1))
+        #         mix_proto_alpha = self.mix_proto_alpha * q_protos_feat_t # (19, 1)
+        #         protos_cur = (1 - mix_proto_alpha) * protos_feat_s + mix_proto_alpha * protos_feat_t
+        #         proto_alpha = min(1 - 1 / (self.local_iter + 1), self.alpha)
+        #         self.protos_feat = proto_alpha * self.protos_feat + (1 - proto_alpha) * protos_cur
+        #         self.protos_feat = self.protos_feat.detach()
+
+        # if self.enable_ctrst_out:
+        #     with torch.no_grad():
+        #         protos_out_s = self.calc_proto(gt_semantic_seg, src_out_te.clone())
+        #         protos_out_t, q_protos_out_t = self.calc_proto(pseudo_label.unsqueeze(1), tgt_out_te.clone(), pseudo_weight.unsqueeze(1))
+        #         mix_proto_alpha = self.mix_proto_alpha * q_protos_out_t # (19, 1)
+        #         protos_cur = (1 - mix_proto_alpha) * protos_out_s + mix_proto_alpha * protos_out_t
+        #         proto_alpha = min(1 - 1 / (self.local_iter + 1), self.alpha)
+        #         self.protos_out = proto_alpha * self.protos_out + (1 - proto_alpha) * protos_cur
+        #         self.protos_out = self.protos_out.detach()
+
+        # # Category contrast for source
+        # if self.enable_ctrst_feat:            
+        #     src_cl_loss = self.calc_cl_loss_feat(src_fusefeat.clone(), gt_semantic_seg)
+        #     log_vars['src.cl_loss_feat'] = 0.0
+        #     if src_cl_loss > 0:
+        #         log_vars['src.cl_loss_feat'] = src_cl_loss.item()
+        #         src_cl_loss = self.ctrst_feat_lambda * src_cl_loss
+        #         src_cl_loss.backward(retain_graph=True)
+
+        # if self.enable_ctrst_out:
+        #     src_cl_loss = self.calc_cl_loss_out(src_out.clone(), gt_semantic_seg)
+        #     log_vars['src.cl_loss_out'] = 0.0
+        #     if src_cl_loss > 0:
+        #         log_vars['src.cl_loss_out'] = src_cl_loss.item()
+        #         src_cl_loss = self.ctrst_out_lambda * src_cl_loss
+        #         src_cl_loss.backward(retain_graph=True)
+
+        if self.enable_ctrst_feat:
+            with torch.no_grad():
+                # protos_feat_s = self.calc_proto(gt_semantic_seg, src_fusefeat_te.clone())
+                protos_feat_m, q_protos_feat_m = self.calc_proto(mixed_lbl, mix_fusefeat_te.clone(), pseudo_weight.unsqueeze(1))
+                # Fuse source and mix protos
+                # mix_alpha = self.mix_proto_alpha * q_protos_feat_m # (19, 1)
+                # protos_feat = (1 - mix_alpha) * protos_feat_s + mix_alpha * protos_feat_m # (19, C)
+                protos_feat = protos_feat_m # (19, C)
+                # Exclude class not existing
+                mask = torch.sum(protos_feat, dim=1)==0
+                protos_feat[mask, :] = self.protos_feat[mask, :]
+                # EMA update
+                proto_alpha = min(1 - 1 / (self.local_iter + 1), self.alpha)
+                proto_alpha = 1 - (1 - proto_alpha) * q_protos_feat_m
+                self.protos_feat = proto_alpha * self.protos_feat + (1 - proto_alpha) * protos_feat
+                self.protos_feat = self.protos_feat.detach()
+        
+        if self.enable_ctrst_out:
+            with torch.no_grad():
+                protos_out_s = self.calc_proto(gt_semantic_seg, src_out_te.clone())
+                protos_out_m, q_protos_out_m = self.calc_proto(mixed_lbl, mix_out_te.clone(), pseudo_weight.unsqueeze(1))
+                # Fuse source and mix protos
+                # mix_alpha = self.mix_proto_alpha * q_protos_out_m # (19, 1)
+                # protos_out = (1 - mix_alpha) * protos_out_s + mix_alpha * protos_out_m # (19, C)
+                protos_out = protos_out_m # (19, C)
+                # Exclude class not existing
+                mask = torch.sum(protos_out, dim=1)==0
+                protos_out[mask, :] = self.protos_out[mask, :]
+                # EMA update
+                proto_alpha = min(1 - 1 / (self.local_iter + 1), self.alpha)
+                proto_alpha = 1 - (1 - proto_alpha) * q_protos_out_m
+                self.protos_out = proto_alpha * self.protos_out + (1 - proto_alpha) * protos_out
+                self.protos_out = self.protos_out.detach()
+
         # Train on mixed images
         mix_losses = self.get_model().forward_train(
-            mixed_img, img_metas, mixed_lbl, pseudo_weight, return_feat=True, return_fusefeat=True)
+            mixed_img, img_metas, mixed_lbl, pseudo_weight, return_feat=True, return_fusefeat=True, return_out=True)
         mix_feat = mix_losses.pop('features')
         mix_fusefeat = mix_losses.pop('fusefeatures')
+        mix_out = mix_losses.pop('out')
 
         mix_losses = add_prefix(mix_losses, 'mix')
         mix_loss, mix_log_vars = self._parse_losses(mix_losses)
         log_vars.update(mix_log_vars)
         mix_loss.backward(retain_graph=True)
 
-        if self.enable_ctrst:
-            mix_cl_loss = self.calc_cl_loss_wo_cam(mix_fusefeat.clone(), mixed_lbl, pseudo_weight.unsqueeze(1))
-            log_vars['mix.cl_loss'] = 0.0
+        # Category contrast for mix
+        if self.enable_ctrst_feat:
+            mix_cl_loss = self.calc_cl_loss_feat(mix_fusefeat.clone(), mixed_lbl, pseudo_weight.unsqueeze(1))
+            log_vars['mix.cl_loss_feat'] = 0.0
             if mix_cl_loss > 0:
-                log_vars['mix.cl_loss'] = mix_cl_loss.item()
-                mix_cl_loss = self.ctrst_lambda * mix_cl_loss
-                mix_cl_loss.backward()
-            
-            with torch.no_grad():
-                protos_m, q_protos_m = self.calc_proto(mixed_lbl, mix_fusefeat.clone(), pseudo_weight.unsqueeze(1))
-                # Update protos
-                mix_proto_alpha = self.mix_proto_alpha * q_protos_m # (19, 1)
-                protos_cur = (1 - mix_proto_alpha) * protos_s + mix_proto_alpha * protos_m
-                proto_alpha = min(1 - 1 / (self.local_iter + 1), self.alpha)
-                self.protos = proto_alpha * self.protos + (1 - proto_alpha) * protos_cur
+                log_vars['mix.cl_loss_feat'] = mix_cl_loss.item()
+                mix_cl_loss = self.ctrst_feat_lambda * mix_cl_loss
+                mix_cl_loss.backward(retain_graph=True)
+        
+        if self.enable_ctrst_out:
+            mix_cl_loss = self.calc_cl_loss_out(mix_out.clone(), mixed_lbl, pseudo_weight.unsqueeze(1))
+            log_vars['mix.cl_loss_out'] = 0.0
+            if mix_cl_loss > 0:
+                log_vars['mix.cl_loss_out'] = mix_cl_loss.item()
+                mix_cl_loss = self.ctrst_out_lambda * mix_cl_loss
+                mix_cl_loss.backward(retain_graph=True)
 
         if self.enable_px_d:
             px_adv_losses = self.px_d_model.forward(

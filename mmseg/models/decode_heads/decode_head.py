@@ -175,7 +175,8 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
                       gt_semantic_seg,
                       train_cfg,
                       seg_weight=None,
-                      return_feat=False):
+                      return_feat=False,
+                      return_out=False):
         """Forward function for training.
         Args:
             inputs (list[Tensor]): List of multi-level img features.
@@ -191,11 +192,20 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
         Returns:
             dict[str, Tensor]: a dictionary of loss components
         """
-        if return_feat:
+
+        if return_feat and return_out:
+            seg_logits, feat = self.forward(inputs, return_feat=return_feat)
+            losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
+            return losses, feat, seg_logits
+        elif return_feat:
             seg_logits, feat = self.forward(inputs, return_feat=return_feat)
             losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
             return losses, feat
-        
+        elif return_out:
+            seg_logits = self.forward(inputs)
+            losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
+            return losses, seg_logits
+
         seg_logits = self.forward(inputs)
         losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
         return losses
@@ -210,7 +220,7 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
         losses = self.losses(seg_logits, gt_semantic_seg, seg_weight)
         return losses, seg_logits
 
-    def forward_test(self, inputs, img_metas, test_cfg):
+    def forward_test(self, inputs, img_metas, test_cfg, return_feat=False):
         """Forward function for testing.
 
         Args:
@@ -225,6 +235,10 @@ class BaseDecodeHead(BaseModule, metaclass=ABCMeta):
         Returns:
             Tensor: Output segmentation map.
         """
+        if return_feat:
+            seg_logits, feat = self.forward(inputs, return_feat=return_feat)
+            return seg_logits, feat
+
         return self.forward(inputs)
 
     def cls_seg(self, feat):
