@@ -439,7 +439,7 @@ class MultiCA(UDADecorator):
         # (B,C)
         src_cls_retain = (src_sum > 0).float().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
         tgt_cls_retain = (tgt_sum > 0).float().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
-        mix_cls_lbl = src_cls_retain + tgt_cls_retain
+        mix_cls_lbl = (src_cls_retain + tgt_cls_retain).detach()
         # (B,C,C)
         src_cls_retain = get_one_hot_cls(src_cls_retain, src_cls_retain.shape[1]).detach()
         tgt_cls_retain = get_one_hot_cls(tgt_cls_retain, tgt_cls_retain.shape[1]).detach()
@@ -448,7 +448,7 @@ class MultiCA(UDADecorator):
         # (B,C)
         mix_sum = mix_lbl_soft.view(b,c,-1).sum(dim=2).float() 
         mix_cnt = mix_lbl_onehot.view(b,c,-1).sum(dim=2).float()
-        cls_weights = mix_sum / mix_cnt
+        cls_weights = (mix_sum / mix_cnt).float().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
         
         with torch.no_grad():
             # y_19 -- multi-hot cls prediction (B, 19)
@@ -474,7 +474,8 @@ class MultiCA(UDADecorator):
         if self.enable_px_d_feat:
             px_adv_losses = self.px_d_feat_model.forward(
                 mix_fusefeat, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1), 
-                weights=pseudo_weight, return_inv=True)
+                # weights=pseudo_weight, 
+                return_inv=True)
 
             px_adv_losses = add_prefix(px_adv_losses, 'adv.mix.feat')
             px_adv_loss, px_adv_log_vars = self._parse_losses(px_adv_losses)
@@ -486,7 +487,8 @@ class MultiCA(UDADecorator):
         if self.enable_px_d_out:
             px_adv_losses = self.px_d_out_model.forward(
                 mix_out, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1), 
-                weights=pseudo_weight, return_inv=True)
+                # weights=pseudo_weight, 
+                return_inv=True)
 
             px_adv_losses = add_prefix(px_adv_losses, 'adv.mix.out')
             px_adv_loss, px_adv_log_vars = self._parse_losses(px_adv_losses)
@@ -499,8 +501,8 @@ class MultiCA(UDADecorator):
             img_adv_losses = self.img_d_feat_model.forward(
                 mix_fusefeat, mix_cam_19, mix_cls_lbl,
                 torch.cat((src_cls_retain, tgt_cls_retain), dim=2), # (B,C,2*C)
-                weights=cls_weights, return_inv=True
-            )
+                # weights=cls_weights, 
+                return_inv=True)
 
             img_adv_losses = add_prefix(img_adv_losses, 'adv.mix.feat')
             img_adv_loss, img_adv_log_vars = self._parse_losses(img_adv_losses)
@@ -513,8 +515,8 @@ class MultiCA(UDADecorator):
             img_adv_losses = self.img_d_out_model.forward(
                 mix_out, mix_cam_19, mix_cls_lbl,
                 torch.cat((src_cls_retain, tgt_cls_retain), dim=2), # (B,C,2*C)
-                weights=cls_weights, return_inv=True
-            )
+                # weights=cls_weights, 
+                return_inv=True)
 
             img_adv_losses = add_prefix(img_adv_losses, 'adv.mix.out')
             img_adv_loss, img_adv_log_vars = self._parse_losses(img_adv_losses)
@@ -544,14 +546,14 @@ class MultiCA(UDADecorator):
         if self.enable_px_d_feat:
             px_losses = self.px_d_feat_model.forward(
                 mix_fusefeat, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1),
-                weights=pseudo_weight
+                # weights=pseudo_weight
             )
             px_loss, px_log_vars = self._parse_losses(px_losses)
             px_loss.backward(retain_graph=True)
         if self.enable_px_d_out:
             px_losses = self.px_d_out_model.forward(
                 mix_out, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1),
-                weights=pseudo_weight
+                # weights=pseudo_weight
             )
             px_loss, px_log_vars = self._parse_losses(px_losses)
             px_loss.backward()
@@ -559,17 +561,19 @@ class MultiCA(UDADecorator):
             img_losses = self.img_d_feat_model.forward(
                 mix_fusefeat, mix_cam_19, mix_cls_lbl,
                 torch.cat((src_cls_retain, tgt_cls_retain), dim=2),
-                weights=cls_weights
+                # weights=cls_weights
             )
             img_loss, img_log_vars = self._parse_losses(img_losses)
+            img_loss = img_loss
             img_loss.backward(retain_graph=True)
         if self.enable_img_d_out:
             img_losses = self.img_d_out_model.forward(
                 mix_out, mix_cam_19, mix_cls_lbl,
                 torch.cat((src_cls_retain, tgt_cls_retain), dim=2),
-                weights=cls_weights
+                # weights=cls_weights
             )
             img_loss, img_log_vars = self._parse_losses(img_losses)
+            img_loss = img_loss
             img_loss.backward()
 
         if self.local_iter % self.debug_img_interval == 0:

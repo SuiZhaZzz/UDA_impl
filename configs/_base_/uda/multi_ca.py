@@ -27,14 +27,14 @@ uda = dict(
     lr_px_d=1e-4,
     enable_px_d_feat=True,
     enable_px_d_out=True,
-    px_adv_feat_lambda=0.005,
-    px_adv_out_lambda=0.005,
+    px_adv_feat_lambda=0.001,
+    px_adv_out_lambda=0.001,
     # Image level
+    lr_img_d=1e-4,
     enable_img_d_feat=True,
     enable_img_d_out=True,
-    img_adv_feat_lambda=0.005,
-    img_adv_out_lambda=0.005,
-    lr_img_d=1e-4,
+    img_adv_feat_lambda=0.001,
+    img_adv_out_lambda=0.001,
 
     # Image classifier
     enable_cls=True,

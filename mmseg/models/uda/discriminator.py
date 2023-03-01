@@ -129,7 +129,8 @@ class ImageDiscriminator(nn.Module):
         tgt_out = [self.cls2(y) for y in out]   # b*n*19
         # labels = [torch.nonzero(gt_2k[i]).squeeze(1) for i in range(gt_2k.shape[0])]
         labels = [gt_2k[i][mask[i]] for i in range(batch_size)]  # b*n*38
-        weight_ls = [weights[i][mask[i]] for i in range(batch_size)] # b*n
+        if weights != None:
+            weight_ls = [weights[i][mask[i]] for i in range(batch_size)] # b*n
 
         losses = dict()
         loss = 0
@@ -138,19 +139,33 @@ class ImageDiscriminator(nn.Module):
         cnt = 0
 
         # n*19
-        for src_logit, tgt_logit, label, weight in zip(src_out, tgt_out, labels, weight_ls):
-            if label.sum() == 0:
-                continue
-            cnt += label.sum()
-            out = torch.cat((src_logit, tgt_logit), dim=1)
-            loss += soft_label_cross_entropy(out, label, weight)
+        if weights != None:
+            for src_logit, tgt_logit, label, weight in zip(src_out, tgt_out, labels, weight_ls):
+                if label.sum() == 0:
+                    continue
+                cnt += label.sum()
+                out = torch.cat((src_logit, tgt_logit), dim=1)
+                loss += soft_label_cross_entropy(out, label, weight)
 
-            acc += (out.argmax(dim=1)==label.argmax(dim=1)).sum().float()
+                acc += (out.argmax(dim=1)==label.argmax(dim=1)).sum().float()
 
-            if return_inv:
-                out = torch.cat((tgt_logit, src_logit), dim=-1)
-                loss_inv += soft_label_cross_entropy(out, label, weight)
-        
+                if return_inv:
+                    out = torch.cat((tgt_logit, src_logit), dim=-1)
+                    loss_inv += soft_label_cross_entropy(out, label, weight)
+        else:
+            for src_logit, tgt_logit, label in zip(src_out, tgt_out, labels):
+                if label.sum() == 0:
+                    continue
+                cnt += label.sum()
+                out = torch.cat((src_logit, tgt_logit), dim=1)
+                loss += soft_label_cross_entropy(out, label)
+
+                acc += (out.argmax(dim=1)==label.argmax(dim=1)).sum().float()
+
+                if return_inv:
+                    out = torch.cat((tgt_logit, src_logit), dim=-1)
+                    loss_inv += soft_label_cross_entropy(out, label)
+
         losses['loss_img_dis'] = loss / batch_size
         losses['acc_img_dis'] = (acc / cnt) * 100.0
         if return_inv:
