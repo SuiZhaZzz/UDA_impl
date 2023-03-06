@@ -32,7 +32,7 @@ from mmseg.models.utils.visualization import subplotimg
 from mmseg.utils.utils import downscale_label_ratio
 
 from mmseg.models.uda.clsnet.network.resnet38_cls import ClsNet
-from mmseg.models.uda.discriminator import PixelDiscriminator, ImageDiscriminator
+from mmseg.models.uda.discriminator import PixelDiscriminator, ImageDiscriminator, PixelDiscriminatorBi, ImageDiscriminatorBi
 
 def _params_equal(ema_model, model):
     for ema_param, param in zip(ema_model.named_parameters(),
@@ -131,7 +131,7 @@ class MultiCA(UDADecorator):
             self.px_adv_feat_lambda = cfg['px_adv_feat_lambda']
         self.enable_px_d_out = cfg['enable_px_d_out']
         if self.enable_px_d_out:
-            self.px_d_out_model = PixelDiscriminator(input_nc=19).to(dev)
+            self.px_d_out_model = PixelDiscriminatorBi().to(dev)
             self.px_d_out_optim = optim.Adam(self.px_d_out_model.parameters(), lr=self.lr_px_d, betas=(0.9, 0.99))
             self.px_adv_out_lambda = cfg['px_adv_out_lambda']
 
@@ -144,7 +144,7 @@ class MultiCA(UDADecorator):
             self.img_adv_feat_lambda = cfg['img_adv_feat_lambda']
         self.enable_img_d_out = cfg['enable_img_d_out']
         if self.enable_img_d_out:
-            self.img_d_out_model = ImageDiscriminator(input_nc=19).to(dev)
+            self.img_d_out_model = ImageDiscriminatorBi().to(dev)
             self.img_d_out_optim = optim.Adam(self.img_d_out_model.parameters(), lr=self.lr_img_d, betas=(0.9, 0.99))
             self.img_adv_out_lambda = cfg['px_adv_out_lambda']
 
@@ -428,10 +428,16 @@ class MultiCA(UDADecorator):
         # (B,1,H,W)
         src_lbl_retain = torch.cat(src_lbl_retain)
         tgt_lbl_retain = torch.cat(tgt_lbl_retain)
+        src_mask = src_lbl_retain
+        src_mask = src_mask.masked_fill(src_mask==255, 0).detach()
+        tgt_mask = tgt_lbl_retain
+        tgt_mask = tgt_mask.masked_fill(tgt_mask==255, 0).detach()
         # Segmentation retained label -> (B,C,H,W)
         src_lbl_retain = get_one_hot(src_lbl_retain, self.num_classes).detach()
         tgt_lbl_retain = get_one_hot(tgt_lbl_retain, self.num_classes).detach()
         mix_lbl_onehot = get_one_hot(mixed_lbl, self.num_classes).detach()
+        mix_lbl_ds = downscale_label_ratio(mixed_lbl, mixed_lbl.shape[-1]//128, 0.75, 19)
+        mix_lbl_ds_onehot = get_one_hot(mix_lbl_ds, self.num_classes).detach()
 
         # Classification retained label -> (B,C)
         src_sum = src_lbl_retain.view(b,c,-1).sum(dim=2).float()
@@ -440,6 +446,9 @@ class MultiCA(UDADecorator):
         src_cls_retain = (src_sum > 0).float().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
         tgt_cls_retain = (tgt_sum > 0).float().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0).detach()
         mix_cls_lbl = (src_cls_retain + tgt_cls_retain).detach()
+        # (B,C,1)
+        src_cls_mask = src_cls_retain.masked_fill(src_cls_retain==255, 0).unsqueeze(-1).detach()
+        tgt_cls_mask = tgt_cls_retain.masked_fill(tgt_cls_retain==255, 0).unsqueeze(-1).detach()
         # (B,C,C)
         src_cls_retain = get_one_hot_cls(src_cls_retain, src_cls_retain.shape[1]).detach()
         tgt_cls_retain = get_one_hot_cls(tgt_cls_retain, tgt_cls_retain.shape[1]).detach()
@@ -461,10 +470,11 @@ class MultiCA(UDADecorator):
 
         # Train on mixed images
         mix_losses = self.get_model().forward_train(
-            mixed_img, img_metas, mixed_lbl, pseudo_weight, return_feat=True, return_fusefeat=True, return_out=True)
-        mix_feat = mix_losses.pop('features')
+            mixed_img, img_metas, mixed_lbl, pseudo_weight, return_feat=False, return_fusefeat=True, return_out=True)
+        # mix_feat = mix_losses.pop('features')
         mix_fusefeat = mix_losses.pop('fusefeatures') # [2, 256, 128, 128]
-        mix_out = mix_losses.pop('out') # [2, 19, 128, 12]
+        mix_out = mix_losses.pop('out') # [2, 19, 128, 128]
+        mix_out = F.softmax(mix_out)
 
         mix_losses = add_prefix(mix_losses, 'mix')
         mix_loss, mix_log_vars = self._parse_losses(mix_losses)
@@ -473,56 +483,54 @@ class MultiCA(UDADecorator):
 
         if self.enable_px_d_feat:
             px_adv_losses = self.px_d_feat_model.forward(
-                mix_fusefeat, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1), 
-                # weights=pseudo_weight, 
-                return_inv=True)
+                mix_fusefeat, src_lbl_retain, tgt_lbl_retain, pseudo_weight, 
+                is_adv=True)
 
             px_adv_losses = add_prefix(px_adv_losses, 'adv.mix.feat')
             px_adv_loss, px_adv_log_vars = self._parse_losses(px_adv_losses)
             log_vars.update(px_adv_log_vars)
 
-            px_adv_loss = self.px_adv_feat_lambda * (px_adv_loss / 2)
+            px_adv_loss = self.px_adv_feat_lambda * px_adv_loss
             px_adv_loss.backward(retain_graph=True)
 
         if self.enable_px_d_out:
             px_adv_losses = self.px_d_out_model.forward(
-                mix_out, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1), 
-                # weights=pseudo_weight, 
-                return_inv=True)
+                mix_out, src_mask, tgt_mask, pseudo_weight, 
+                is_adv=True)
 
             px_adv_losses = add_prefix(px_adv_losses, 'adv.mix.out')
             px_adv_loss, px_adv_log_vars = self._parse_losses(px_adv_losses)
             log_vars.update(px_adv_log_vars)
 
-            px_adv_loss = self.px_adv_out_lambda * (px_adv_loss / 2)
+            px_adv_loss = self.px_adv_out_lambda * px_adv_loss
             px_adv_loss.backward(retain_graph=True)
 
         if self.enable_img_d_feat:
             img_adv_losses = self.img_d_feat_model.forward(
-                mix_fusefeat, mix_cam_19, mix_cls_lbl,
-                torch.cat((src_cls_retain, tgt_cls_retain), dim=2), # (B,C,2*C)
-                # weights=cls_weights, 
-                return_inv=True)
+                mix_fusefeat, mix_lbl_ds_onehot, mix_cls_lbl,
+                src_cls_retain, tgt_cls_retain, # (B,C,C)
+                cls_weights, 
+                is_adv=True)
 
             img_adv_losses = add_prefix(img_adv_losses, 'adv.mix.feat')
             img_adv_loss, img_adv_log_vars = self._parse_losses(img_adv_losses)
             log_vars.update(img_adv_log_vars)
 
-            img_adv_loss = self.img_adv_feat_lambda * (img_adv_loss / 2)
+            img_adv_loss = self.img_adv_feat_lambda * img_adv_loss
             img_adv_loss.backward(retain_graph=True)
 
         if self.enable_img_d_out:
             img_adv_losses = self.img_d_out_model.forward(
-                mix_out, mix_cam_19, mix_cls_lbl,
-                torch.cat((src_cls_retain, tgt_cls_retain), dim=2), # (B,C,2*C)
-                # weights=cls_weights, 
-                return_inv=True)
+                mix_out, mix_lbl_ds_onehot, mix_cls_lbl,
+                src_cls_mask, tgt_cls_mask, # (B,C,1)
+                cls_weights, 
+                is_adv=True)
 
             img_adv_losses = add_prefix(img_adv_losses, 'adv.mix.out')
             img_adv_loss, img_adv_log_vars = self._parse_losses(img_adv_losses)
             log_vars.update(img_adv_log_vars)
 
-            img_adv_loss = self.img_adv_out_lambda * (img_adv_loss / 2)
+            img_adv_loss = self.img_adv_out_lambda * img_adv_loss
             img_adv_loss.backward()
 
         # Train D
@@ -545,35 +553,50 @@ class MultiCA(UDADecorator):
         mix_out = mix_out.detach()
         if self.enable_px_d_feat:
             px_losses = self.px_d_feat_model.forward(
-                mix_fusefeat, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1),
-                # weights=pseudo_weight
+                mix_fusefeat, src_lbl_retain, tgt_lbl_retain, pseudo_weight
             )
+
+            px_losses = add_prefix(px_losses, 'dis.mix.feat')
             px_loss, px_log_vars = self._parse_losses(px_losses)
-            px_loss.backward(retain_graph=True)
+            log_vars.update(px_log_vars)
+
+            px_loss.backward()
+        
         if self.enable_px_d_out:
             px_losses = self.px_d_out_model.forward(
-                mix_out, torch.cat((src_lbl_retain, tgt_lbl_retain), dim=1),
-                # weights=pseudo_weight
+                mix_out, src_mask, tgt_mask, pseudo_weight
             )
+
+            px_losses = add_prefix(px_losses, 'dis.mix.out')
             px_loss, px_log_vars = self._parse_losses(px_losses)
+            log_vars.update(px_log_vars)
+
             px_loss.backward()
+        
         if self.enable_img_d_feat:
             img_losses = self.img_d_feat_model.forward(
-                mix_fusefeat, mix_cam_19, mix_cls_lbl,
-                torch.cat((src_cls_retain, tgt_cls_retain), dim=2),
-                # weights=cls_weights
+                mix_fusefeat, mix_lbl_ds_onehot, mix_cls_lbl,
+                src_cls_retain, tgt_cls_retain,
+                cls_weights
             )
+
+            img_losses = add_prefix(img_losses, 'dis.mix.feat')
             img_loss, img_log_vars = self._parse_losses(img_losses)
-            img_loss = img_loss
-            img_loss.backward(retain_graph=True)
+            log_vars.update(img_log_vars)
+
+            img_loss.backward()
+        
         if self.enable_img_d_out:
             img_losses = self.img_d_out_model.forward(
-                mix_out, mix_cam_19, mix_cls_lbl,
-                torch.cat((src_cls_retain, tgt_cls_retain), dim=2),
-                # weights=cls_weights
+                mix_out, mix_lbl_ds_onehot, mix_cls_lbl,
+                src_cls_mask, tgt_cls_mask,
+                cls_weights
             )
+
+            img_losses = add_prefix(img_losses, 'dis.mix.out')
             img_loss, img_log_vars = self._parse_losses(img_losses)
-            img_loss = img_loss
+            log_vars.update(img_log_vars)
+
             img_loss.backward()
 
         if self.local_iter % self.debug_img_interval == 0:

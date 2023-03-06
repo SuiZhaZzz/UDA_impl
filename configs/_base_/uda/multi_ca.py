@@ -37,7 +37,7 @@ uda = dict(
     img_adv_out_lambda=0.001,
 
     # Image classifier
-    enable_cls=True,
+    enable_cls=False,
     cls_pretrained='/root/autodl-tmp/DAFormer/pretrained/ep50.pth',
     cls_thred=0.5,
 )
